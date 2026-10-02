@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+# 取得データ・キャッシュは netkeiba 規約（私的利用の範囲）に従い公開リポジトリに含めない
+data/
