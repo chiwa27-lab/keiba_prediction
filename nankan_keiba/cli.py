@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from datetime import date
@@ -9,6 +10,10 @@ from pathlib import Path
 from .client import AccessDeniedError, FetchError, PoliteHttpClient, RequestBudgetExceeded
 from .collector import Collector, default_period
 from .config import DEFAULT_INTERVAL_SEC, DEFAULT_JITTER_SEC, DEFAULT_USER_AGENT, MIN_INTERVAL_SEC, NANKAN_PLACES
+from .features import build_features, load_history, load_win_payouts
+from .model import RaceModel
+from .model import train as train_model
+from .predict import fetch_cards, find_race_ids, format_predictions, predict_cards
 from .storage import RaceStore
 
 logger = logging.getLogger("nankan_keiba")
@@ -57,6 +62,30 @@ def build_parser() -> argparse.ArgumentParser:
     export = sub.add_parser("export", help="SQLite の内容を CSV に書き出す")
     export.add_argument("--db", type=Path, default=Path("data/nankan.sqlite"))
     export.add_argument("--out", type=Path, default=Path("data/csv"))
+
+    train = sub.add_parser("train", help="保存済みのレース結果で予想モデルを学習")
+    train.add_argument("--db", type=Path, default=Path("data/nankan.sqlite"))
+    train.add_argument("--model-dir", type=Path, default=Path("data/model"))
+    train.add_argument("--valid-from", type=_parse_date, help="検証期間の開始日 YYYY-MM-DD（既定: 直近 20%% の開催日）")
+    train.add_argument("--use-odds", action="store_true", help="単勝オッズ・人気も特徴量に使う")
+
+    predict = sub.add_parser("predict", help="出馬表を取得して着順を予想")
+    target = predict.add_mutually_exclusive_group(required=True)
+    target.add_argument("--date", type=_parse_date, help="開催日 YYYY-MM-DD（対象競馬場の全レース）")
+    target.add_argument("--race-id", nargs="+", help="race_id（12 桁）")
+    predict.add_argument(
+        "--places",
+        nargs="+",
+        choices=sorted(NANKAN_PLACES),
+        default=sorted(NANKAN_PLACES),
+        help="--date 指定時の競馬場コード（既定: 全て）",
+    )
+    predict.add_argument("--db", type=Path, default=Path("data/nankan.sqlite"))
+    predict.add_argument("--model-dir", type=Path, default=Path("data/model"))
+    predict.add_argument("--out", type=Path, help="予想結果の CSV（既定: data/predictions/<日付 or race_id>.csv）")
+    predict.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
+    predict.add_argument("--interval", type=float, default=DEFAULT_INTERVAL_SEC)
+    predict.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
     return parser
 
 
@@ -122,6 +151,48 @@ def _run_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_train(args: argparse.Namespace) -> int:
+    features = build_features(load_history(args.db))
+    model, metrics = train_model(
+        features,
+        load_win_payouts(args.db),
+        valid_from=args.valid_from,
+        use_odds=args.use_odds,
+    )
+    model.save(args.model_dir)
+    logger.info("検証結果:\n%s", json.dumps(metrics, ensure_ascii=False, indent=2))
+    logger.info("モデルを保存しました: %s", args.model_dir)
+    return 0
+
+
+def _run_predict(args: argparse.Namespace) -> int:
+    model = RaceModel.load(args.model_dir)
+    client = PoliteHttpClient(args.cache_dir, interval=args.interval, user_agent=args.user_agent)
+    try:
+        if args.date:
+            race_ids = find_race_ids(client, args.date.strftime("%Y%m%d"), args.places)
+            if not race_ids:
+                logger.error("%s の対象レースが見つかりません", args.date)
+                return 1
+        else:
+            race_ids = args.race_id
+        cards = fetch_cards(client, race_ids)
+    except AccessDeniedError as exc:
+        logger.error("%s", exc)
+        return 2
+    except FetchError as exc:
+        logger.error("%s", exc)
+        return 1
+
+    pred = predict_cards(model, load_history(args.db), cards)
+    out = args.out or Path("data/predictions") / f"{args.date or race_ids[0]}.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pred.to_csv(out, index=False, encoding="utf-8-sig")
+    print(format_predictions(pred))
+    logger.info("予想結果を保存しました: %s", out)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(
@@ -130,6 +201,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.command == "collect":
         return _run_collect(args)
+    if args.command == "train":
+        return _run_train(args)
+    if args.command == "predict":
+        return _run_predict(args)
     return _run_export(args)
 
 

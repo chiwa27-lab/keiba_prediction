@@ -32,3 +32,7 @@ def race_list_url(kaisai_date: str) -> str:
 
 def race_result_url(race_id: str) -> str:
     return f"{NAR_BASE_URL}/race/result.html?race_id={race_id}"
+
+
+def shutuba_url(race_id: str) -> str:
+    return f"{NAR_BASE_URL}/race/shutuba.html?race_id={race_id}"
