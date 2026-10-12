@@ -123,7 +123,7 @@ def train(
     *,
     valid_from: date | None = None,
     use_odds: bool = False,
-    objective: str = "lambdarank",
+    objective: str = "binary",
     params: dict[str, object] | None = None,
 ) -> tuple[RaceModel, dict[str, object]]:
     """時系列で検証してから、全期間で学習し直したモデルと検証結果を返す."""

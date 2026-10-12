@@ -48,13 +48,25 @@ ENTRY_COLUMNS = [
     "horse_weight",
     "horse_weight_diff",
     "corner_passing",
+    "trainer_affiliation",
 ]
 
-CATEGORICAL_FEATURES = ["place_code", "surface", "track_condition", "weather", "sex", "class_group"]
+CATEGORICAL_FEATURES = [
+    "place_code",
+    "surface",
+    "track_condition",
+    "weather",
+    "sex",
+    "class_group",
+    "affiliation_group",
+]
 
 BASE_FEATURES = [
     *CATEGORICAL_FEATURES,
     "distance",
+    "straight_m",
+    "circuit_m",
+    "course_front_adv",
     "num_horses",
     "race_number",
     "month",
@@ -89,6 +101,10 @@ BASE_FEATURES = [
     "prev_early_pos",
     "early_pos_mean3",
     "early_pos_mean5",
+    "style_fit",
+    "race_front_runners",
+    "jra_jockey",
+    "race_jra_count",
     "place_starts",
     "place_win_rate",
     "place_top3_rate",
@@ -128,6 +144,17 @@ _RACE_RANK_SOURCES = [
 _LOWER_IS_BETTER = frozenset({"rel_finish_mean5", "time_behind_mean5", "std_diff_mean5", "early_pos_mean5"})
 
 STANDARD_TIME_MIN_SAMPLES = 30
+COURSE_BIAS_MIN_SAMPLES = 100
+
+PLACE_AFFILIATIONS = {"42": "浦和", "43": "船橋", "44": "大井", "45": "川崎"}
+JRA_AFFILIATIONS = frozenset({"美浦", "栗東"})
+# netkeiba の騎手 ID は JRA 所属が 01 始まり、地方所属が 05 始まり
+JRA_JOCKEY_ID_PREFIX = "01"
+
+# ゴールまでの直線（m）と 1 周（m）。地方競馬情報サイト・日刊競馬のコース解説による
+COURSE_LAYOUTS = {"42": (220, 1200), "43": (308, 1400), "44": (386, 1600), "45": (300, 1200)}
+# 大井の内回り（1500m・1600m）と左回り外回り（1650m）
+OI_COURSE_BY_DISTANCE = {1500: (286, 1400), 1600: (286, 1400), 1650: (300, 1600)}
 
 
 def feature_columns(use_odds: bool) -> list[str]:
@@ -205,6 +232,32 @@ def first_corner_positions(corner_passing: object) -> dict[int, int]:
     return corner_positions(str(corners[first]))
 
 
+def course_layout(place_code: object, distance: object) -> tuple[float, float]:
+    """(ゴールまでの直線, 1 周距離)。不明なら NaN."""
+    code = str(place_code)
+    meters = int(distance) if isinstance(distance, int | float | np.number) and not np.isnan(distance) else None
+    if code == "44" and meters in OI_COURSE_BY_DISTANCE:
+        straight, circuit = OI_COURSE_BY_DISTANCE[meters]
+        return float(straight), float(circuit)
+    if code in COURSE_LAYOUTS:
+        straight, circuit = COURSE_LAYOUTS[code]
+        return float(straight), float(circuit)
+    return np.nan, np.nan
+
+
+def affiliation_group(affiliation: object, place_code: object) -> str:
+    """所属を、地元・南関東の他場・JRA・他地区・不明に分ける."""
+    if not isinstance(affiliation, str) or not affiliation:
+        return "unknown"
+    if affiliation == PLACE_AFFILIATIONS.get(str(place_code)):
+        return "home"
+    if affiliation in PLACE_AFFILIATIONS.values():
+        return "nankan"
+    if affiliation in JRA_AFFILIATIONS:
+        return "jra"
+    return "other_nar"
+
+
 def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     """履歴（＋予想対象）の各行に特徴量とラベルを付けて返す.
 
@@ -236,6 +289,14 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     df["num_horses"] = df["num_horses"].fillna(field_size)
     df["month"] = df["race_date"].dt.month
     df["class_group"] = df["race_class"].map(class_group)
+    layouts = [course_layout(c, d) for c, d in zip(df["place_code"], df["distance"], strict=True)]
+    df["straight_m"] = [straight for straight, _ in layouts]
+    df["circuit_m"] = [circuit for _, circuit in layouts]
+    df["affiliation_group"] = [
+        affiliation_group(a, c) for a, c in zip(df["trainer_affiliation"], df["place_code"], strict=True)
+    ]
+    df["jra_jockey"] = df["jockey_id"].astype("string").str.startswith(JRA_JOCKEY_ID_PREFIX).fillna(False).astype(int)
+    df["race_jra_count"] = (df["affiliation_group"] == "jra").groupby(df["race_id"]).transform("sum")
 
     pos = df["finish_position"]
     df["is_win"] = np.where(ran, (pos == 1).astype(float), np.nan)
@@ -259,6 +320,7 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     _add_prior_day_rates(df, ["jockey_id", "horse_id"], "jockey_horse")
     _add_prior_day_rates(df, ["jockey_id", "place_code"], "jockey_place")
     df["jockey_pop_response"] = _prior_day_mean(df, ["jockey_id"], "pop_response", df["pop_response"].notna())[0]
+    _add_course_style_features(df)
 
     for col in _RACE_RANK_SOURCES:
         ascending = col in _LOWER_IS_BETTER
@@ -360,6 +422,26 @@ def _add_early_position(df: pd.DataFrame) -> None:
     merged = df[["race_id", "horse_number"]].merge(corners, on=["race_id", "horse_number"], how="left")
     position = pd.Series(merged["_corner_pos"].to_numpy(dtype=float), index=df.index)
     df["early_pos"] = (position / df["num_horses"]).where(df["ran"] == 1)
+
+
+def _add_course_style_features(df: pd.DataFrame) -> None:
+    """コースの先行有利度と、馬の脚質との相性.
+
+    ``course_front_adv`` は同じ競馬場・距離で前日までに、最初のコーナーで前 1/3 にいた馬の 3 着内率から
+    後ろ 1/3 にいた馬の 3 着内率を引いた値（サンプルが少なければ競馬場全体の値）。
+    ``style_fit`` は馬の直近 5 走の先行度（0.5 より前ほど正）にそれを掛けたもの。
+    """
+    front = df["early_pos"] <= 1 / 3
+    back = df["early_pos"] >= 2 / 3
+    adv = pd.Series(np.nan, index=df.index)
+    for keys in (["place_code", "distance"], ["place_code"]):
+        front_rate, front_n = _prior_day_mean(df, keys, "is_top3", front)
+        back_rate, back_n = _prior_day_mean(df, keys, "is_top3", back)
+        enough = (front_n >= COURSE_BIAS_MIN_SAMPLES) & (back_n >= COURSE_BIAS_MIN_SAMPLES)
+        adv = adv.where(adv.notna(), (front_rate - back_rate).where(enough))
+    df["course_front_adv"] = adv
+    df["style_fit"] = (0.5 - df["early_pos_mean5"]) * adv
+    df["race_front_runners"] = (df["early_pos_mean5"] <= 0.25).groupby(df["race_id"]).transform("sum")
 
 
 def _prior_day_mean(df: pd.DataFrame, keys: list[str], col: str, mask: pd.Series) -> tuple[pd.Series, pd.Series]:

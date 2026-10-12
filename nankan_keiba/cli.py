@@ -71,8 +71,8 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--objective",
         choices=OBJECTIVES,
-        default="lambdarank",
-        help="lambdarank: レース内の順位を直接学習（既定） / binary: 1 着・3 着内を別々に 2 値分類",
+        default="binary",
+        help="binary: 1 着・3 着内を別々に 2 値分類（既定） / lambdarank: レース内の順位を直接学習",
     )
 
     predict = sub.add_parser("predict", help="出馬表を取得して着順を予想")

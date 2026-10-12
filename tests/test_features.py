@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -7,9 +9,11 @@ import pytest
 from nankan_keiba import features as features_module
 from nankan_keiba.features import (
     BASE_FEATURES,
+    affiliation_group,
     build_features,
     class_group,
     corner_positions,
+    course_layout,
     first_corner_positions,
 )
 
@@ -160,3 +164,49 @@ def test_early_position_pop_response_and_place_rates_use_only_past() -> None:
     assert later["place_win_rate"] == 1.0
     assert later["jockey_place_starts"] == 2 and later["jockey_place_win_rate"] == 1.0
     assert f.loc[("202644020101", "h3"), "early_pos_mean5_race_rank"] < later["early_pos_mean5_race_rank"]
+
+
+def test_course_layout_and_affiliation_group() -> None:
+    assert course_layout("45", 1400) == (300.0, 1200.0)
+    assert course_layout("44", 1200) == (386.0, 1600.0)
+    assert course_layout("44", 1600) == (286.0, 1400.0)
+    assert np.isnan(course_layout("30", 1400)[0])
+    assert affiliation_group("大井", "44") == "home"
+    assert affiliation_group("川崎", "44") == "nankan"
+    assert affiliation_group("美浦", "44") == affiliation_group("栗東", "45") == "jra"
+    assert affiliation_group("高知", "44") == "other_nar"
+    assert affiliation_group(None, "44") == affiliation_group("", "44") == "unknown"
+
+
+def test_jra_features() -> None:
+    history = _history()
+    history["trainer_affiliation"] = ["大井", "美浦", "栗東", None, "大井", "美浦", "川崎", "高知"]
+    history.loc[history["horse_id"] == "h3", "jockey_id"] = "01088"
+    f = build_features(history).set_index(["race_id", "horse_id"])
+    assert f.loc[("202644010101", "h1"), "race_jra_count"] == 2
+    assert f.loc[("202644010102", "h4"), "race_jra_count"] == 0
+    assert f.loc[("202644010102", "h4"), "affiliation_group"] == "unknown"
+    assert f.loc[("202644020101", "h3"), "affiliation_group"] == "nankan"
+    assert f.loc[("202644010101", "h3"), "jra_jockey"] == 1
+    assert f.loc[("202644010101", "h1"), "jra_jockey"] == 0
+
+
+def test_course_front_advantage_uses_only_prior_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(features_module, "COURSE_BIAS_MIN_SAMPLES", 1)
+    rows = []
+    for race_id, corner in (("202645010101", "1,2,3,4,5,6"), ("202645020101", "6,5,4,3,2,1")):
+        for n in range(1, 7):
+            row = _row(race_id, f"h{n}", n)
+            row["num_horses"] = 6
+            row["corner_passing"] = json.dumps({"3コーナー": corner})
+            rows.append(row)
+    f = build_features(pd.DataFrame(rows)).set_index(["race_id", "horse_id"])
+
+    assert np.isnan(f.loc[("202645010101", "h1"), "course_front_adv"])
+    # 1/1 は前 1/3（h1, h2）が 3 着内 2/2、後ろ 1/3（h5, h6）が 0/2。1/2 の結果はまだ使わない
+    day2 = f.loc[("202645020101", "h1")]
+    assert day2["course_front_adv"] == pytest.approx(1.0)
+    assert day2["early_pos_mean5"] == pytest.approx(1 / 6)
+    assert day2["style_fit"] == pytest.approx(0.5 - 1 / 6)
+    assert f.loc[("202645020101", "h6"), "style_fit"] == pytest.approx(-0.5)
+    assert day2["race_front_runners"] == 1
