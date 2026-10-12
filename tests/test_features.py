@@ -5,7 +5,13 @@ import pandas as pd
 import pytest
 
 from nankan_keiba import features as features_module
-from nankan_keiba.features import BASE_FEATURES, build_features, class_group
+from nankan_keiba.features import (
+    BASE_FEATURES,
+    build_features,
+    class_group,
+    corner_positions,
+    first_corner_positions,
+)
 
 
 def _row(
@@ -126,3 +132,31 @@ def test_standard_time_diff_uses_only_prior_days(monkeypatch: pytest.MonkeyPatch
         df.loc[("202644030101", "h2"), "std_diff_mean5_race_rank"]
         < df.loc[("202644030101", "h1"), "std_diff_mean5_race_rank"]
     )
+
+
+def test_corner_positions_share_position_within_parentheses() -> None:
+    assert corner_positions("(4,5),8,(1,6,7),2-3") == {4: 1, 5: 1, 8: 3, 1: 4, 6: 4, 7: 4, 2: 7, 3: 8}
+    assert first_corner_positions('{"4コーナー": "2,1", "3コーナー": "1,(2,3)"}') == {1: 1, 2: 2, 3: 2}
+    assert first_corner_positions(None) == {}
+
+
+def test_early_position_pop_response_and_place_rates_use_only_past() -> None:
+    history = _history()
+    corners = {"202644010101": '{"3コーナー": "3,(1,2)"}', "202644020101": '{"3コーナー": "1,5,3"}'}
+    history["corner_passing"] = history["race_id"].map(corners)
+    history["popularity"] = [3, 1, 2, 1, 1, None, 3, 2]
+    f = build_features(history).set_index(["race_id", "horse_id"])
+
+    assert np.isnan(f.loc[("202644010101", "h1"), "prev_early_pos"])
+    later = f.loc[("202644020101", "h1")]
+    assert later["prev_early_pos"] == pytest.approx(2 / 3)
+    assert f.loc[("202644020101", "h3"), "prev_early_pos"] == pytest.approx(1 / 3)
+    # 1 番人気で 2 着 → log2(1/2)、3 番人気で 1 着 → log2(3)
+    assert f.loc[("202644020101", "h2"), "prev_pop_response"] == pytest.approx(-1.0)
+    assert later["prev_pop_response"] == pytest.approx(np.log2(3))
+    # J1 は 1/1 に 3 番人気 1 着・1 番人気 1 着
+    assert later["jockey_pop_response"] == pytest.approx(np.log2(3) / 2)
+    assert np.isnan(f.loc[("202644010102", "h4"), "jockey_pop_response"])
+    assert later["place_win_rate"] == 1.0
+    assert later["jockey_place_starts"] == 2 and later["jockey_place_win_rate"] == 1.0
+    assert f.loc[("202644020101", "h3"), "early_pos_mean5_race_rank"] < later["early_pos_mean5_race_rank"]

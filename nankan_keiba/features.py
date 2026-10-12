@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from contextlib import closing
@@ -46,6 +47,7 @@ ENTRY_COLUMNS = [
     "last_3f",
     "horse_weight",
     "horse_weight_diff",
+    "corner_passing",
 ]
 
 CATEGORICAL_FEATURES = ["place_code", "surface", "track_condition", "weather", "sex", "class_group"]
@@ -82,7 +84,13 @@ BASE_FEATURES = [
     "std_diff_mean3",
     "std_diff_mean5",
     "best_std_diff5",
+    "prev_pop_response",
+    "pop_response_mean5",
+    "prev_early_pos",
+    "early_pos_mean3",
+    "early_pos_mean5",
     "place_starts",
+    "place_win_rate",
     "place_top3_rate",
     "distance_starts",
     "distance_top3_rate",
@@ -92,20 +100,32 @@ BASE_FEATURES = [
     "trainer_starts",
     "trainer_win_rate",
     "trainer_top3_rate",
+    "jockey_pop_response",
+    "jockey_place_starts",
+    "jockey_place_win_rate",
+    "jockey_place_top3_rate",
     "jockey_horse_starts",
     "rel_finish_mean5_race_rank",
     "time_behind_mean5_race_rank",
     "jockey_top3_rate_race_rank",
     "horse_top3_rate_race_rank",
     "std_diff_mean5_race_rank",
+    "early_pos_mean5_race_rank",
 ]
 
 ODDS_FEATURES = ["win_odds", "popularity", "win_odds_race_rank"]
 
 LABELS = ["is_win", "is_top3"]
 
-_RACE_RANK_SOURCES = ["rel_finish_mean5", "time_behind_mean5", "jockey_top3_rate", "horse_top3_rate", "std_diff_mean5"]
-_LOWER_IS_BETTER = frozenset({"rel_finish_mean5", "time_behind_mean5", "std_diff_mean5"})
+_RACE_RANK_SOURCES = [
+    "rel_finish_mean5",
+    "time_behind_mean5",
+    "jockey_top3_rate",
+    "horse_top3_rate",
+    "std_diff_mean5",
+    "early_pos_mean5",
+]
+_LOWER_IS_BETTER = frozenset({"rel_finish_mean5", "time_behind_mean5", "std_diff_mean5", "early_pos_mean5"})
 
 STANDARD_TIME_MIN_SAMPLES = 30
 
@@ -146,6 +166,7 @@ _RACE_COLUMNS = frozenset(
         "weather",
         "track_condition",
         "num_horses",
+        "corner_passing",
     }
 )
 
@@ -160,6 +181,28 @@ def class_group(race_class: object) -> str:
         if key in race_class:
             return "OP" if key == "オープン" else key
     return "other"
+
+
+def corner_positions(text: str) -> dict[int, int]:
+    """'(4,5),8,(1,6,7),2-3' → {4: 1, 5: 1, 8: 3, 1: 4, 6: 4, 7: 4, 2: 7, 3: 8}（括弧内は同じ位置）."""
+    positions: dict[int, int] = {}
+    for m in re.finditer(r"\(([^)]*)\)|(\d+)", text):
+        horses = [int(h) for h in re.findall(r"\d+", m.group(1))] if m.group(1) is not None else [int(m.group(2))]
+        position = len(positions) + 1
+        for horse in horses:
+            positions.setdefault(horse, position)
+    return positions
+
+
+def first_corner_positions(corner_passing: object) -> dict[int, int]:
+    """コーナー通過順の JSON から、最初に記録されたコーナーの各馬番の位置を返す."""
+    if not isinstance(corner_passing, str) or not corner_passing:
+        return {}
+    corners = json.loads(corner_passing)
+    if not corners:
+        return {}
+    first = min(corners, key=lambda name: int(m.group()) if (m := re.search(r"\d+", name)) else 99)
+    return corner_positions(str(corners[first]))
 
 
 def build_features(frame: pd.DataFrame) -> pd.DataFrame:
@@ -204,6 +247,9 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     df["ran_date"] = df["race_date"].where(ran)
     df["ran_distance"] = df["distance"].where(ran)
     _add_standard_time_diff(df)
+    _add_early_position(df)
+    finish = pos.where(pos.notna(), df["num_horses"])
+    df["pop_response"] = np.where(ran, np.log2(df["popularity"] / finish), np.nan)
 
     _add_horse_features(df)
     _add_group_rates(df, ["horse_id", "place_code"], "place")
@@ -211,6 +257,8 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     _add_prior_day_rates(df, "jockey_id", "jockey")
     _add_prior_day_rates(df, "trainer_id", "trainer")
     _add_prior_day_rates(df, ["jockey_id", "horse_id"], "jockey_horse")
+    _add_prior_day_rates(df, ["jockey_id", "place_code"], "jockey_place")
+    df["jockey_pop_response"] = _prior_day_mean(df, ["jockey_id"], "pop_response", df["pop_response"].notna())[0]
 
     for col in _RACE_RANK_SOURCES:
         ascending = col in _LOWER_IS_BETTER
@@ -252,7 +300,16 @@ def _add_horse_features(df: pd.DataFrame) -> None:
     df["days_since_last"] = (df["race_date"] - _shifted(df, key, "ran_date")).dt.days
     df["distance_change"] = df["distance"] - _shifted(df, key, "ran_distance")
 
-    for name in ("rel_finish", "time_behind", "last_3f", "last3f_rank", "popularity", "std_diff"):
+    for name in (
+        "rel_finish",
+        "time_behind",
+        "last_3f",
+        "last3f_rank",
+        "popularity",
+        "std_diff",
+        "pop_response",
+        "early_pos",
+    ):
         df[f"_{name}_ran"] = _ran_only(df, name)
     df["prev_rel_finish"] = _shifted(df, key, "_rel_finish_ran")
     df["prev_time_behind"] = _shifted(df, key, "_time_behind_ran")
@@ -269,6 +326,11 @@ def _add_horse_features(df: pd.DataFrame) -> None:
     df["std_diff_mean3"] = _shifted(df, key, "_std_diff_ran", 3)
     df["std_diff_mean5"] = _shifted(df, key, "_std_diff_ran", 5)
     df["best_std_diff5"] = _shifted(df, key, "_std_diff_ran", 5, how="min")
+    df["prev_pop_response"] = _shifted(df, key, "_pop_response_ran")
+    df["pop_response_mean5"] = _shifted(df, key, "_pop_response_ran", 5)
+    df["prev_early_pos"] = _shifted(df, key, "_early_pos_ran")
+    df["early_pos_mean3"] = _shifted(df, key, "_early_pos_ran", 3)
+    df["early_pos_mean5"] = _shifted(df, key, "_early_pos_ran", 5)
     df.drop(columns=[c for c in df.columns if c.startswith("_")], inplace=True)
 
 
@@ -287,9 +349,22 @@ def _add_standard_time_diff(df: pd.DataFrame) -> None:
     df["std_diff"] = (df["finish_time_sec"] - standard) / df["distance"] * 1000
 
 
+def _add_early_position(df: pd.DataFrame) -> None:
+    """最初のコーナーでの位置を頭数で割った値（小さいほど前）を ``early_pos`` に入れる."""
+    records = [
+        (race_id, horse, position)
+        for race_id, text in df.groupby("race_id", sort=False)["corner_passing"].first().items()
+        for horse, position in first_corner_positions(text).items()
+    ]
+    corners = pd.DataFrame(records, columns=["race_id", "horse_number", "_corner_pos"])
+    merged = df[["race_id", "horse_number"]].merge(corners, on=["race_id", "horse_number"], how="left")
+    position = pd.Series(merged["_corner_pos"].to_numpy(dtype=float), index=df.index)
+    df["early_pos"] = (position / df["num_horses"]).where(df["ran"] == 1)
+
+
 def _prior_day_mean(df: pd.DataFrame, keys: list[str], col: str, mask: pd.Series) -> tuple[pd.Series, pd.Series]:
-    """``keys`` ごとに、当日より前の開催日までの ``col`` の平均と件数を各行に揃えて返す."""
-    tmp = df.loc[mask, [*keys, "race_date", col]]
+    """``keys`` ごとに、当日より前の開催日までの ``col``（``mask`` の行だけ）の平均と件数を各行に揃えて返す."""
+    tmp = df[[*keys, "race_date"]].assign(**{col: df[col].where(mask)})
     daily = tmp.groupby([*keys, "race_date"], sort=True, dropna=True)[col].agg(["sum", "count"])
     prior = (daily.groupby(level=list(range(len(keys)))).cumsum() - daily).reset_index()
     merged = df[[*keys, "race_date"]].merge(prior, on=[*keys, "race_date"], how="left")
@@ -301,8 +376,10 @@ def _prior_day_mean(df: pd.DataFrame, keys: list[str], col: str, mask: pd.Series
 def _add_group_rates(df: pd.DataFrame, keys: list[str], prefix: str) -> None:
     g = df.groupby(keys, sort=False, dropna=True)
     starts = g["ran"].cumsum() - df["ran"]
+    wins = g["is_win"].transform(lambda s: s.fillna(0).cumsum().shift(1, fill_value=0))
     top3 = g["is_top3"].transform(lambda s: s.fillna(0).cumsum().shift(1, fill_value=0))
     df[f"{prefix}_starts"] = starts
+    df[f"{prefix}_win_rate"] = wins / starts.replace(0, np.nan)
     df[f"{prefix}_top3_rate"] = top3 / starts.replace(0, np.nan)
 
 
