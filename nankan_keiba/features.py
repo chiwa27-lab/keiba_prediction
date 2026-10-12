@@ -78,6 +78,10 @@ BASE_FEATURES = [
     "time_behind_mean5",
     "last3f_rank_mean3",
     "best_rel_finish5",
+    "prev_std_diff",
+    "std_diff_mean3",
+    "std_diff_mean5",
+    "best_std_diff5",
     "place_starts",
     "place_top3_rate",
     "distance_starts",
@@ -93,13 +97,17 @@ BASE_FEATURES = [
     "time_behind_mean5_race_rank",
     "jockey_top3_rate_race_rank",
     "horse_top3_rate_race_rank",
+    "std_diff_mean5_race_rank",
 ]
 
 ODDS_FEATURES = ["win_odds", "popularity", "win_odds_race_rank"]
 
 LABELS = ["is_win", "is_top3"]
 
-_RACE_RANK_SOURCES = ["rel_finish_mean5", "time_behind_mean5", "jockey_top3_rate", "horse_top3_rate"]
+_RACE_RANK_SOURCES = ["rel_finish_mean5", "time_behind_mean5", "jockey_top3_rate", "horse_top3_rate", "std_diff_mean5"]
+_LOWER_IS_BETTER = frozenset({"rel_finish_mean5", "time_behind_mean5", "std_diff_mean5"})
+
+STANDARD_TIME_MIN_SAMPLES = 30
 
 
 def feature_columns(use_odds: bool) -> list[str]:
@@ -195,6 +203,7 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     df["last3f_rank"] = df.groupby("race_id")["last_3f"].rank(pct=True)
     df["ran_date"] = df["race_date"].where(ran)
     df["ran_distance"] = df["distance"].where(ran)
+    _add_standard_time_diff(df)
 
     _add_horse_features(df)
     _add_group_rates(df, ["horse_id", "place_code"], "place")
@@ -204,7 +213,7 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     _add_prior_day_rates(df, ["jockey_id", "horse_id"], "jockey_horse")
 
     for col in _RACE_RANK_SOURCES:
-        ascending = col in ("rel_finish_mean5", "time_behind_mean5")
+        ascending = col in _LOWER_IS_BETTER
         df[f"{col}_race_rank"] = df.groupby("race_id")[col].rank(pct=True, ascending=ascending)
     df["win_odds_race_rank"] = df.groupby("race_id")["win_odds"].rank(pct=True)
 
@@ -243,7 +252,7 @@ def _add_horse_features(df: pd.DataFrame) -> None:
     df["days_since_last"] = (df["race_date"] - _shifted(df, key, "ran_date")).dt.days
     df["distance_change"] = df["distance"] - _shifted(df, key, "ran_distance")
 
-    for name in ("rel_finish", "time_behind", "last_3f", "last3f_rank", "popularity"):
+    for name in ("rel_finish", "time_behind", "last_3f", "last3f_rank", "popularity", "std_diff"):
         df[f"_{name}_ran"] = _ran_only(df, name)
     df["prev_rel_finish"] = _shifted(df, key, "_rel_finish_ran")
     df["prev_time_behind"] = _shifted(df, key, "_time_behind_ran")
@@ -256,7 +265,37 @@ def _add_horse_features(df: pd.DataFrame) -> None:
     df["time_behind_mean5"] = _shifted(df, key, "_time_behind_ran", 5)
     df["last3f_rank_mean3"] = _shifted(df, key, "_last3f_rank_ran", 3)
     df["best_rel_finish5"] = _shifted(df, key, "_rel_finish_ran", 5, how="min")
+    df["prev_std_diff"] = _shifted(df, key, "_std_diff_ran")
+    df["std_diff_mean3"] = _shifted(df, key, "_std_diff_ran", 3)
+    df["std_diff_mean5"] = _shifted(df, key, "_std_diff_ran", 5)
+    df["best_std_diff5"] = _shifted(df, key, "_std_diff_ran", 5, how="min")
     df.drop(columns=[c for c in df.columns if c.startswith("_")], inplace=True)
+
+
+def _add_standard_time_diff(df: pd.DataFrame) -> None:
+    """走破タイムと基準タイムの差（1000m あたりの秒、マイナスほど速い）を ``std_diff`` に入れる.
+
+    基準タイムは同じ競馬場・コース・距離・馬場状態で、前日までに走った全馬の平均タイム。
+    サンプルが少ないときは馬場状態を問わない平均で代用する。
+    """
+    timed = (df["ran"] == 1) & df["finish_time_sec"].notna()
+    course = ["place_code", "surface", "distance"]
+    standard = pd.Series(np.nan, index=df.index)
+    for keys in ([*course, "track_condition"], course):
+        mean, count = _prior_day_mean(df, keys, "finish_time_sec", timed)
+        standard = standard.where(standard.notna(), mean.where(count >= STANDARD_TIME_MIN_SAMPLES))
+    df["std_diff"] = (df["finish_time_sec"] - standard) / df["distance"] * 1000
+
+
+def _prior_day_mean(df: pd.DataFrame, keys: list[str], col: str, mask: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """``keys`` ごとに、当日より前の開催日までの ``col`` の平均と件数を各行に揃えて返す."""
+    tmp = df.loc[mask, [*keys, "race_date", col]]
+    daily = tmp.groupby([*keys, "race_date"], sort=True, dropna=True)[col].agg(["sum", "count"])
+    prior = (daily.groupby(level=list(range(len(keys)))).cumsum() - daily).reset_index()
+    merged = df[[*keys, "race_date"]].merge(prior, on=[*keys, "race_date"], how="left")
+    count = pd.Series(merged["count"].to_numpy(dtype=float), index=df.index)
+    total = pd.Series(merged["sum"].to_numpy(dtype=float), index=df.index)
+    return total / count.replace(0, np.nan), count.fillna(0)
 
 
 def _add_group_rates(df: pd.DataFrame, keys: list[str], prefix: str) -> None:

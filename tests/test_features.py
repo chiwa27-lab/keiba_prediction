@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
+from nankan_keiba import features as features_module
 from nankan_keiba.features import BASE_FEATURES, build_features, class_group
 
 
@@ -100,3 +102,27 @@ def test_target_rows_get_features_without_labels() -> None:
     assert rows.loc["h3", "horse_win_rate"] == 0.5
     assert rows.loc["h1", "rel_finish_mean5"] == rows.loc["h3", "rel_finish_mean5"] == 2 / 3
     assert rows["rel_finish_mean5_race_rank"].tolist() == [0.75, 0.75]
+
+
+def test_standard_time_diff_uses_only_prior_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(features_module, "STANDARD_TIME_MIN_SAMPLES", 1)
+    rows = [
+        _row("202644010101", "h1", 1),
+        _row("202644010101", "h2", 2),
+        _row("202644020101", "h1", 2),
+        _row("202644020101", "h2", 1),
+        _row("202644030101", "h1", None),
+        _row("202644030101", "h2", None),
+    ]
+    df = build_features(pd.DataFrame(rows)).set_index(["race_id", "horse_id"])
+
+    assert np.isnan(df.loc[("202644010101", "h1"), "std_diff"])
+    standard = (70.5 + 71.0) / 2
+    assert df.loc[("202644020101", "h1"), "std_diff"] == pytest.approx((71.0 - standard) / 1.2)
+    assert np.isnan(df.loc[("202644020101", "h1"), "prev_std_diff"])
+    assert df.loc[("202644030101", "h1"), "prev_std_diff"] == pytest.approx((71.0 - standard) / 1.2)
+    assert df.loc[("202644030101", "h2"), "prev_std_diff"] == pytest.approx((70.5 - standard) / 1.2)
+    assert (
+        df.loc[("202644030101", "h2"), "std_diff_mean5_race_rank"]
+        < df.loc[("202644030101", "h1"), "std_diff_mean5_race_rank"]
+    )

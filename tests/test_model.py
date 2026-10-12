@@ -5,9 +5,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from nankan_keiba.features import build_features
-from nankan_keiba.model import RaceModel, log_loss, roc_auc, train
+from nankan_keiba.model import RaceModel, log_loss, plackett_luce_top3, race_softmax, roc_auc, train
 
 
 def _synthetic_history(days: int = 60, races_per_day: int = 4, field: int = 8) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -60,10 +61,11 @@ def test_metrics() -> None:
     assert abs(log_loss(y, np.array([0.5, 0.5, 0.5, 0.5])) - np.log(2)) < 1e-12
 
 
-def test_train_evaluate_save_and_predict(tmp_path: Path) -> None:
+@pytest.mark.parametrize("objective", ["lambdarank", "binary"])
+def test_train_evaluate_save_and_predict(tmp_path: Path, objective: str) -> None:
     history, payouts = _synthetic_history()
     features = build_features(history)
-    model, metrics = train(features, payouts, valid_from=date(2026, 2, 20))
+    model, metrics = train(features, payouts, valid_from=date(2026, 2, 20), objective=objective)
 
     assert metrics["valid_from"] == "2026-02-20"
     assert float(metrics["top3_auc"]) > 0.6  # type: ignore[arg-type]
@@ -76,3 +78,22 @@ def test_train_evaluate_save_and_predict(tmp_path: Path) -> None:
     assert abs(pred["win_prob"].sum() - 1.0) < 1e-9
     assert pred["top3_prob"].between(0, 1).all()
     np.testing.assert_allclose(pred["win_prob"], model.predict(race)["win_prob"])
+    assert loaded.objective == objective
+
+
+def test_plackett_luce_top3() -> None:
+    np.testing.assert_allclose(plackett_luce_top3(np.full(6, 1 / 6)), np.full(6, 0.5))
+    probs = plackett_luce_top3(np.array([0.5, 0.2, 0.15, 0.1, 0.05]))
+    assert probs.sum() == pytest.approx(3.0)
+    assert list(np.argsort(-probs)) == [0, 1, 2, 3, 4]
+    np.testing.assert_allclose(plackett_luce_top3(np.array([0.7, 0.3])), [1.0, 1.0])
+    flat = plackett_luce_top3(np.array([0.5, 0.2, 0.15, 0.1, 0.05]), discount=0.5)
+    assert flat.sum() == pytest.approx(3.0)
+    assert flat[0] < probs[0] and flat[-1] > probs[-1]
+
+
+def test_race_softmax_sums_to_one_per_race() -> None:
+    race = pd.Series(["a", "a", "b", "b", "b"])
+    p = race_softmax(np.array([1.0, 2.0, 0.0, 0.0, 3.0]), race)
+    np.testing.assert_allclose(pd.Series(p).groupby(race).sum(), [1.0, 1.0])
+    assert p[1] > p[0]

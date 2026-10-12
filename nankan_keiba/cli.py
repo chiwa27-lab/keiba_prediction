@@ -11,7 +11,7 @@ from .client import AccessDeniedError, FetchError, PoliteHttpClient, RequestBudg
 from .collector import Collector, default_period
 from .config import DEFAULT_INTERVAL_SEC, DEFAULT_JITTER_SEC, DEFAULT_USER_AGENT, MIN_INTERVAL_SEC, NANKAN_PLACES
 from .features import build_features, load_history, load_win_payouts
-from .model import RaceModel
+from .model import OBJECTIVES, RaceModel
 from .model import train as train_model
 from .predict import fetch_cards, find_race_ids, format_predictions, predict_cards
 from .storage import RaceStore
@@ -68,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--model-dir", type=Path, default=Path("data/model"))
     train.add_argument("--valid-from", type=_parse_date, help="検証期間の開始日 YYYY-MM-DD（既定: 直近 20%% の開催日）")
     train.add_argument("--use-odds", action="store_true", help="単勝オッズ・人気も特徴量に使う")
+    train.add_argument(
+        "--objective",
+        choices=OBJECTIVES,
+        default="lambdarank",
+        help="lambdarank: レース内の順位を直接学習（既定） / binary: 1 着・3 着内を別々に 2 値分類",
+    )
 
     predict = sub.add_parser("predict", help="出馬表を取得して着順を予想")
     target = predict.add_mutually_exclusive_group(required=True)
@@ -158,6 +164,7 @@ def _run_train(args: argparse.Namespace) -> int:
         load_win_payouts(args.db),
         valid_from=args.valid_from,
         use_odds=args.use_odds,
+        objective=args.objective,
     )
     model.save(args.model_dir)
     logger.info("検証結果:\n%s", json.dumps(metrics, ensure_ascii=False, indent=2))
