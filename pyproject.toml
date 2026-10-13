@@ -5,12 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "nankan-keiba"
 version = "0.1.0"
-description = "南関東競馬のレース結果を netkeiba から低負荷で収集するツール（個人利用向け）"
+description = "南関東競馬のレース結果を netkeiba から低負荷で収集し、着順を予想するツール（個人利用向け）"
 requires-python = ">=3.10"
 dependencies = [
     "requests==2.32.3",
     "beautifulsoup4==4.12.3",
     "lxml==5.3.0",
+    "numpy==2.2.6",
+    "pandas==2.2.3",
+    "lightgbm==4.6.0",
 ]
 
 [project.optional-dependencies]

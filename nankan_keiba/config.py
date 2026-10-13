@@ -2,7 +2,10 @@ from __future__ import annotations
 
 NAR_HOST = "nar.netkeiba.com"
 NAR_BASE_URL = f"https://{NAR_HOST}"
-ALLOWED_HOSTS = frozenset({NAR_HOST})
+# 血統（5 代血統表）は地方・中央共通の競走馬データベースにある
+DB_HOST = "db.netkeiba.com"
+DB_BASE_URL = f"https://{DB_HOST}"
+ALLOWED_HOSTS = frozenset({NAR_HOST, DB_HOST})
 
 # netkeiba の地方競馬場コード（race_id の 5〜6 桁目）
 NANKAN_PLACES: dict[str, str] = {
@@ -32,3 +35,11 @@ def race_list_url(kaisai_date: str) -> str:
 
 def race_result_url(race_id: str) -> str:
     return f"{NAR_BASE_URL}/race/result.html?race_id={race_id}"
+
+
+def shutuba_url(race_id: str) -> str:
+    return f"{NAR_BASE_URL}/race/shutuba.html?race_id={race_id}"
+
+
+def horse_pedigree_url(horse_id: str) -> str:
+    return f"{DB_BASE_URL}/horse/ped/{horse_id}/"

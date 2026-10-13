@@ -72,6 +72,22 @@ class Payout:
 
 
 @dataclass
+class Pedigree:
+    """父・母・母の父。血統表を取得できなかった馬は horse_id 以外が None."""
+
+    horse_id: str
+    sire_id: str | None = None
+    sire_name: str | None = None
+    sire_line: str | None = None
+    sire_sire_id: str | None = None
+    sire_sire_name: str | None = None
+    dam_id: str | None = None
+    dam_name: str | None = None
+    damsire_id: str | None = None
+    damsire_name: str | None = None
+
+
+@dataclass
 class RaceResult:
     race: RaceInfo
     entries: list[ResultEntry] = field(default_factory=list)
