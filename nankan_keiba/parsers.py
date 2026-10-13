@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from bs4 import BeautifulSoup, Tag
 
 from .config import NANKAN_PLACES
-from .models import Kaisai, Payout, RaceInfo, RaceResult, ResultEntry
+from .models import Kaisai, Payout, Pedigree, RaceInfo, RaceResult, ResultEntry
 
 _KAISAI_LINK_RE = re.compile(r"kaisai_date=(\d{8})&(?:amp;)?kaisai_id=(\d{10})")
 _RESULT_LINK_RE = re.compile(r"result\.html\?race_id=(\d{12})")
@@ -137,6 +137,43 @@ def parse_shutuba(html: str, race_id: str) -> RaceResult:
     if not entries:
         raise ParseError(f"{race_id}: 出走馬が見つかりません")
     return RaceResult(race=_parse_race_info(soup, race_id), entries=entries)
+
+
+def parse_pedigree(html: str, horse_id: str) -> Pedigree:
+    """5 代血統表から父・父の父・母・母の父と、父の系統（例: 'Mr. Prospector系'）を読み取る."""
+    table = BeautifulSoup(html, "lxml").select_one("table.blood_table")
+    if table is None:
+        raise ParseError(f"{horse_id}: 血統表が見つかりません（ページ構造変更の可能性）")
+    parents = table.find_all("td", rowspan="16")
+    if len(parents) < 2:
+        raise ParseError(f"{horse_id}: 血統表の父・母が読み取れません")
+    sire, dam = parents[0], parents[1]
+    sire_id, sire_name = _pedigree_horse(sire)
+    sire_sire_id, sire_sire_name = _pedigree_horse(sire.find_next_sibling("td"))
+    dam_id, dam_name = _pedigree_horse(dam)
+    damsire_id, damsire_name = _pedigree_horse(dam.find_next_sibling("td"))
+    sire_line = next((s for s in sire.stripped_strings if s.endswith("系")), None)
+    return Pedigree(
+        horse_id=horse_id,
+        sire_id=sire_id,
+        sire_name=sire_name,
+        sire_line=sire_line,
+        sire_sire_id=sire_sire_id,
+        sire_sire_name=sire_sire_name,
+        dam_id=dam_id,
+        dam_name=dam_name,
+        damsire_id=damsire_id,
+        damsire_name=damsire_name,
+    )
+
+
+def _pedigree_horse(cell: object) -> tuple[str | None, str | None]:
+    if not isinstance(cell, Tag):
+        return None, None
+    link = cell.find("a", href=_ID_IN_PATH_RE["horse"])
+    if not isinstance(link, Tag):
+        return None, None
+    return _link_id(cell, "horse"), _text(link) or None
 
 
 def _sex_age(text: str | None) -> tuple[str | None, int | None]:

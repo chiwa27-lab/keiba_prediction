@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 from .client import NotFoundError, PoliteHttpClient
-from .config import NANKAN_PLACES, calendar_url, race_list_url, race_result_url
-from .models import Kaisai
-from .parsers import ParseError, parse_calendar, parse_race_ids, parse_result
+from .config import NANKAN_PLACES, calendar_url, horse_pedigree_url, race_list_url, race_result_url
+from .models import Kaisai, Pedigree
+from .parsers import ParseError, parse_calendar, parse_pedigree, parse_race_ids, parse_result
 from .storage import RaceStore
 
 logger = logging.getLogger(__name__)
@@ -118,3 +118,25 @@ class Collector:
                 self.client.request_count,
             )
         return stats
+
+
+def collect_pedigrees(client: PoliteHttpClient, store: RaceStore, horse_ids: Iterable[str]) -> tuple[int, int]:
+    """馬ごとに血統表を 1 ページずつ取得して保存する。(保存数, 読み取れなかった数) を返す.
+
+    ページが無い・読み取れない馬も、空の血統として保存して二度と取りに行かない。
+    """
+    saved = failed = 0
+    for i, horse_id in enumerate(horse_ids, 1):
+        url = horse_pedigree_url(horse_id)
+        try:
+            pedigree = parse_pedigree(client.get(url), horse_id)
+        except (ParseError, NotFoundError) as exc:
+            client.invalidate(url)
+            logger.warning("%s", exc)
+            pedigree = Pedigree(horse_id)
+            failed += 1
+        store.save_pedigree(pedigree)
+        saved += 1
+        if i % 100 == 0:
+            logger.info("血統 %d 頭目まで保存（読み取れず %d 頭, リクエスト %d）", i, failed, client.request_count)
+    return saved, failed

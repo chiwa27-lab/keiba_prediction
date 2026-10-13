@@ -210,3 +210,69 @@ def test_course_front_advantage_uses_only_prior_days(monkeypatch: pytest.MonkeyP
     assert day2["style_fit"] == pytest.approx(0.5 - 1 / 6)
     assert f.loc[("202645020101", "h6"), "style_fit"] == pytest.approx(-0.5)
     assert day2["race_front_runners"] == 1
+
+
+def test_same_day_bias_uses_only_earlier_races(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(features_module, "DAY_BIAS_MIN_SAMPLES", 1)
+    rows = []
+    # 1R は前に行った馬（馬番の小さい馬）が上位、2R は後ろの馬が上位、3R は予想対象
+    for race_id, corner, order in (
+        ("202645010101", "1,2,3,4,5,6", [1, 2, 3, 4, 5, 6]),
+        ("202645010102", "1,2,3,4,5,6", [6, 5, 4, 3, 2, 1]),
+        ("202645010103", "", [None] * 6),
+    ):
+        for n, pos in enumerate(order, start=1):
+            row = _row(race_id, f"h{n}{race_id[-1]}", pos)
+            row["horse_number"] = n
+            row["num_horses"] = 6
+            row["corner_passing"] = json.dumps({"3コーナー": corner}) if corner else None
+            rows.append(row)
+    f = build_features(pd.DataFrame(rows)).set_index(["race_id", "horse_number"])
+
+    first = f.loc[("202645010101", 1)]
+    assert first["day_prior_races"] == 0 and np.isnan(first["day_front_adv"])
+    second = f.loc[("202645010102", 1)]
+    # 1R だけ: 前 1/3（1, 2 番）が 3 着内 2/2、後ろ 1/3（5, 6 番）が 0/2。2R の結果は使わない
+    assert second["day_prior_races"] == 1
+    assert second["day_front_adv"] == pytest.approx(1.0)
+    assert second["day_inner_adv"] == pytest.approx(1.0)
+    assert second["day_winner_early_pos"] == pytest.approx(1 / 6)
+    third = f.loc[("202645010103", 1)]
+    assert third["day_prior_races"] == 2
+    assert third["day_front_adv"] == pytest.approx(0.0)
+    assert third["day_winner_early_pos"] == pytest.approx((1 / 6 + 1) / 2)
+    assert third["day_inner_fit"] == pytest.approx(0.0)
+    other_place = _row("202644010101", "x1", None)
+    assert (
+        build_features(pd.DataFrame([*rows, other_place])).set_index("race_id").loc["202644010101", "day_prior_races"]
+        == 0
+    )
+
+
+def test_pedigree_features_use_only_prior_days() -> None:
+    history = _history()
+    history["sire_id"] = history["horse_id"].map({"h1": "S1", "h3": "S1", "h4": "S1", "h5": "S1"})
+    history["damsire_id"] = "D1"
+    history["dam_id"] = history["horse_id"].map({"h1": "M1", "h5": "M1"})
+    history["sire_line"] = "Halo系"
+    target = _row("202644030101", "h9", None)
+    target.update(sire_id="S1", damsire_id="D1", dam_id="M1", sire_line="Halo系")
+    f = build_features(pd.concat([history, pd.DataFrame([target])], ignore_index=True))
+    f = f.set_index(["race_id", "horse_id"])
+
+    # 1/1 の産駒（h1, h3, h4）は当日なので 0 戦扱い
+    assert f.loc[("202644010101", "h1"), "sire_starts"] == 0
+    # 1/2 時点: 1/1 の S1 産駒は 3 戦 2 勝・3 着内 3
+    day2 = f.loc[("202644020101", "h5")]
+    assert day2["sire_starts"] == 3
+    assert day2["sire_win_rate"] == pytest.approx(2 / 3)
+    assert day2["sire_dist_top3_rate"] == pytest.approx(1.0)
+    assert day2["dam_starts"] == 1 and day2["dam_top3_rate"] == pytest.approx(1.0)
+    # 初出走の馬にも血統の成績が付く（1/2 の取消は数えない）
+    debut = f.loc[("202644030101", "h9")]
+    assert debut["horse_starts"] == 0
+    assert debut["sire_starts"] == 6
+    assert debut["sire_win_rate"] == pytest.approx(3 / 6)
+    assert debut["damsire_starts"] == 7
+    assert debut["sire_line"] == "Halo系"
+    assert debut["sire_wet_top3_rate"] == pytest.approx(1.0)

@@ -8,12 +8,12 @@ from datetime import date
 from pathlib import Path
 
 from .client import AccessDeniedError, FetchError, PoliteHttpClient, RequestBudgetExceeded
-from .collector import Collector, default_period
+from .collector import Collector, collect_pedigrees, default_period
 from .config import DEFAULT_INTERVAL_SEC, DEFAULT_JITTER_SEC, DEFAULT_USER_AGENT, MIN_INTERVAL_SEC, NANKAN_PLACES
-from .features import build_features, load_history, load_win_payouts
+from .features import build_features, load_history, load_pedigrees, load_win_payouts
 from .model import OBJECTIVES, RaceModel
 from .model import train as train_model
-from .predict import fetch_cards, find_race_ids, format_predictions, predict_cards
+from .predict import fetch_cards, fetch_same_day_results, find_race_ids, format_predictions, predict_cards
 from .storage import RaceStore
 
 logger = logging.getLogger("nankan_keiba")
@@ -58,6 +58,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     collect.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
     collect.add_argument("--refetch", action="store_true", help="保存済み・キャッシュ済みのレース結果も取得し直す")
+
+    pedigree = sub.add_parser("pedigree", help="保存済みの出走馬の血統（父・母・母の父）を収集して SQLite に保存")
+    pedigree.add_argument("--db", type=Path, default=Path("data/nankan.sqlite"))
+    pedigree.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
+    pedigree.add_argument(
+        "--interval",
+        type=float,
+        default=DEFAULT_INTERVAL_SEC,
+        help=f"リクエスト間隔（秒, 最小 {MIN_INTERVAL_SEC}）",
+    )
+    pedigree.add_argument("--jitter", type=float, default=DEFAULT_JITTER_SEC, help="間隔に加えるランダム秒数の上限")
+    pedigree.add_argument(
+        "--max-requests",
+        type=int,
+        default=1500,
+        help="1 回の実行で送るリクエスト数の上限（0 で無制限）",
+    )
+    pedigree.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
 
     export = sub.add_parser("export", help="SQLite の内容を CSV に書き出す")
     export.add_argument("--db", type=Path, default=Path("data/nankan.sqlite"))
@@ -147,6 +165,38 @@ def _run_collect(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _run_pedigree(args: argparse.Namespace) -> int:
+    client = PoliteHttpClient(
+        args.cache_dir,
+        interval=args.interval,
+        jitter=args.jitter,
+        max_requests=args.max_requests or None,
+        user_agent=args.user_agent,
+    )
+    store = RaceStore(args.db)
+    horse_ids = store.horses_without_pedigree()
+    logger.info("血統が未取得の馬: %d 頭", len(horse_ids))
+    exit_code = 0
+    try:
+        saved, failed = collect_pedigrees(client, store, horse_ids)
+        logger.info("完了: 保存 %d 頭（うち読み取れなかった馬 %d 頭）", saved, failed)
+    except RequestBudgetExceeded as exc:
+        logger.warning("%s。再実行すると続きから収集します", exc)
+    except AccessDeniedError as exc:
+        logger.error("%s", exc)
+        exit_code = 2
+    except FetchError as exc:
+        logger.error("%s。時間をおいて再実行してください", exc)
+        exit_code = 1
+    except KeyboardInterrupt:
+        logger.warning("中断しました。再実行すると続きから収集します")
+        exit_code = 130
+    finally:
+        logger.info("リクエスト %d 件 / DB: pedigrees=%d", client.request_count, store.count("pedigrees"))
+        store.close()
+    return exit_code
+
+
 def _run_export(args: argparse.Namespace) -> int:
     store = RaceStore(args.db)
     try:
@@ -175,6 +225,7 @@ def _run_train(args: argparse.Namespace) -> int:
 def _run_predict(args: argparse.Namespace) -> int:
     model = RaceModel.load(args.model_dir)
     client = PoliteHttpClient(args.cache_dir, interval=args.interval, user_agent=args.user_agent)
+    history = load_history(args.db)
     try:
         if args.date:
             race_ids = find_race_ids(client, args.date.strftime("%Y%m%d"), args.places)
@@ -184,6 +235,18 @@ def _run_predict(args: argparse.Namespace) -> int:
         else:
             race_ids = args.race_id
         cards = fetch_cards(client, race_ids)
+        same_day = fetch_same_day_results(client, race_ids, set(history["race_id"]))
+        if same_day:
+            logger.info("当日の前のレースの結果 %d レース分を馬場傾向に使います", len(same_day))
+        horse_ids = [e.horse_id for r in [*cards, *same_day] for e in r.entries if e.horse_id]
+        store = RaceStore(args.db)
+        try:
+            missing = store.missing_pedigrees(horse_ids)
+            if missing:
+                logger.info("血統が未取得の馬 %d 頭の血統表を取得します", len(missing))
+                collect_pedigrees(client, store, missing)
+        finally:
+            store.close()
     except AccessDeniedError as exc:
         logger.error("%s", exc)
         return 2
@@ -191,7 +254,7 @@ def _run_predict(args: argparse.Namespace) -> int:
         logger.error("%s", exc)
         return 1
 
-    pred = predict_cards(model, load_history(args.db), cards)
+    pred = predict_cards(model, history, cards, same_day=same_day, pedigrees=load_pedigrees(args.db))
     out = args.out or Path("data/predictions") / f"{args.date or race_ids[0]}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     pred.to_csv(out, index=False, encoding="utf-8-sig")
@@ -212,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_train(args)
     if args.command == "predict":
         return _run_predict(args)
+    if args.command == "pedigree":
+        return _run_pedigree(args)
     return _run_export(args)
 
 

@@ -51,6 +51,10 @@ ENTRY_COLUMNS = [
     "trainer_affiliation",
 ]
 
+# 血統テーブル（pedigrees）から結合する列。未取得の馬は欠損
+PEDIGREE_COLUMNS = ["sire_id", "sire_line", "dam_id", "damsire_id"]
+HISTORY_COLUMNS = [*ENTRY_COLUMNS, *PEDIGREE_COLUMNS]
+
 CATEGORICAL_FEATURES = [
     "place_code",
     "surface",
@@ -59,6 +63,7 @@ CATEGORICAL_FEATURES = [
     "sex",
     "class_group",
     "affiliation_group",
+    "sire_line",
 ]
 
 BASE_FEATURES = [
@@ -127,6 +132,26 @@ BASE_FEATURES = [
     "horse_top3_rate_race_rank",
     "std_diff_mean5_race_rank",
     "early_pos_mean5_race_rank",
+    "sire_starts",
+    "sire_win_rate",
+    "sire_top3_rate",
+    "sire_dist_starts",
+    "sire_dist_top3_rate",
+    "sire_place_top3_rate",
+    "sire_wet_top3_rate",
+    "sire_std_diff",
+    "damsire_starts",
+    "damsire_top3_rate",
+    "dam_starts",
+    "dam_top3_rate",
+    "day_prior_races",
+    "day_front_adv",
+    "day_front_excess",
+    "day_inner_adv",
+    "day_std_diff",
+    "day_winner_early_pos",
+    "day_style_fit",
+    "day_inner_fit",
 ]
 
 ODDS_FEATURES = ["win_odds", "popularity", "win_odds_race_rank"]
@@ -145,6 +170,11 @@ _LOWER_IS_BETTER = frozenset({"rel_finish_mean5", "time_behind_mean5", "std_diff
 
 STANDARD_TIME_MIN_SAMPLES = 30
 COURSE_BIAS_MIN_SAMPLES = 100
+# 当日の前のレースから馬場傾向を出すのに必要な、前 1/3・後ろ 1/3 それぞれの最低頭数
+DAY_BIAS_MIN_SAMPLES = 4
+WET_TRACK_CONDITIONS = frozenset({"重", "不良"})
+# 血統の距離適性を見る距離区分（m）
+DISTANCE_BANDS = [0, 1300, 1500, 1700, 9999]
 
 PLACE_AFFILIATIONS = {"42": "浦和", "43": "船橋", "44": "大井", "45": "川崎"}
 JRA_AFFILIATIONS = frozenset({"美浦", "栗東"})
@@ -162,13 +192,31 @@ def feature_columns(use_odds: bool) -> list[str]:
 
 
 def load_history(db_path: Path) -> pd.DataFrame:
-    """races と results を結合した 1 頭 1 行の履歴."""
+    """races と results（あれば血統も）を結合した 1 頭 1 行の履歴."""
     if not db_path.exists():
         raise FileNotFoundError(f"DB が見つかりません: {db_path}")
     columns = ", ".join(f"ra.{c}" if c in _RACE_COLUMNS else f"r.{c}" for c in ENTRY_COLUMNS)
     query = f"SELECT {columns} FROM results r JOIN races ra ON ra.race_id = r.race_id"
     with closing(sqlite3.connect(db_path)) as conn:
-        return pd.read_sql_query(query, conn)
+        history = pd.read_sql_query(query, conn)
+    return attach_pedigrees(history, load_pedigrees(db_path))
+
+
+def load_pedigrees(db_path: Path) -> pd.DataFrame:
+    """血統テーブル（horse_id と PEDIGREE_COLUMNS）。テーブルが無ければ空."""
+    with closing(sqlite3.connect(db_path)) as conn:
+        exists = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pedigrees'").fetchone()
+        if not exists:
+            return pd.DataFrame(columns=["horse_id", *PEDIGREE_COLUMNS])
+        return pd.read_sql_query(f"SELECT horse_id, {', '.join(PEDIGREE_COLUMNS)} FROM pedigrees", conn)
+
+
+def attach_pedigrees(frame: pd.DataFrame, pedigrees: pd.DataFrame) -> pd.DataFrame:
+    """horse_id で血統の列を付ける（既にある血統の列は置き換える）."""
+    base = frame.drop(columns=[c for c in PEDIGREE_COLUMNS if c in frame.columns])
+    merged = base.merge(pedigrees[["horse_id", *PEDIGREE_COLUMNS]], on="horse_id", how="left")
+    merged.index = base.index
+    return merged
 
 
 def load_win_payouts(db_path: Path) -> pd.DataFrame:
@@ -264,7 +312,7 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     予想対象の行は ``finish_status`` を欠損にしておく。ラベル列は出走した行だけ 0/1、
     それ以外（取消・除外・予想対象）は NaN になる。
     """
-    df = frame.reindex(columns=ENTRY_COLUMNS).copy()
+    df = frame.reindex(columns=HISTORY_COLUMNS).copy()
     df["race_date"] = pd.to_datetime(df["race_date"])
     df = df.sort_values(["race_date", "race_id", "horse_number"], kind="mergesort").reset_index(drop=True)
 
@@ -321,6 +369,9 @@ def build_features(frame: pd.DataFrame) -> pd.DataFrame:
     _add_prior_day_rates(df, ["jockey_id", "place_code"], "jockey_place")
     df["jockey_pop_response"] = _prior_day_mean(df, ["jockey_id"], "pop_response", df["pop_response"].notna())[0]
     _add_course_style_features(df)
+    df = df.copy()
+    _add_pedigree_features(df)
+    _add_same_day_bias(df)
 
     for col in _RACE_RANK_SOURCES:
         ascending = col in _LOWER_IS_BETTER
@@ -482,3 +533,73 @@ def _add_prior_day_rates(df: pd.DataFrame, keys: str | list[str], prefix: str) -
         if prefix != "jockey_horse":
             df[f"{prefix}_win_rate"] = np.where(starts > 0, merged["wins"].to_numpy(dtype=float) / starts, np.nan)
             df[f"{prefix}_top3_rate"] = np.where(starts > 0, merged["top3"].to_numpy(dtype=float) / starts, np.nan)
+
+
+def _add_pedigree_features(df: pd.DataFrame) -> None:
+    """父・母の父・母（兄弟姉妹）の産駒成績を、前日までの南関東での結果から集計する.
+
+    過去成績のない馬（デビュー戦・転入初戦）でも、血統から能力・適性の手がかりを得るため。
+    """
+    df["_dist_band"] = pd.cut(df["distance"], DISTANCE_BANDS, labels=False)
+    df["_wet"] = df["track_condition"].isin(WET_TRACK_CONDITIONS).astype(int)
+    _add_prior_day_rates(df, "sire_id", "sire")
+    _add_prior_day_rates(df, ["sire_id", "_dist_band"], "sire_dist")
+    _add_prior_day_rates(df, ["sire_id", "place_code"], "sire_place")
+    _add_prior_day_rates(df, ["sire_id", "_wet"], "sire_wet")
+    _add_prior_day_rates(df, "damsire_id", "damsire")
+    _add_prior_day_rates(df, "dam_id", "dam")
+    timed = (df["ran"] == 1) & df["std_diff"].notna()
+    df["sire_std_diff"] = _prior_day_mean(df, ["sire_id"], "std_diff", timed)[0]
+    df.drop(columns=["_dist_band", "_wet"], inplace=True)
+
+
+def _add_same_day_bias(df: pd.DataFrame) -> None:
+    """同じ日・同じ競馬場で、そのレースより前に終わったレースの結果から当日の馬場傾向を出す.
+
+    発走直前に予想する前提で、前のレースの確定結果は使ってよい情報として扱う。
+    - ``day_front_adv``: 最初のコーナーで前 1/3 にいた馬と後ろ 1/3 にいた馬の 3 着内率の差
+    - ``day_front_excess``: それがコースのふだんの先行有利度（``course_front_adv``）よりどれだけ大きいか
+    - ``day_inner_adv``: 馬番が内 1/3 の馬と外 1/3 の馬の 3 着内率の差
+    - ``day_std_diff``: 前のレースの走破タイムの基準タイム差の平均（マイナスほど時計が速い馬場）
+    - ``day_winner_early_pos``: 前のレースの勝ち馬の先行度の平均
+    """
+    ran = df["ran"] == 1
+    draw = df["horse_number"] / df["num_horses"]
+    top3 = df["is_top3"].fillna(0)
+    parts = {
+        "front_n": ran & (df["early_pos"] <= 1 / 3),
+        "back_n": ran & (df["early_pos"] >= 2 / 3),
+        "inner_n": ran & (draw <= 1 / 3),
+        "outer_n": ran & (draw > 2 / 3),
+    }
+    tmp = df[["race_date", "place_code", "race_number"]].copy()
+    for name, mask in parts.items():
+        tmp[name] = mask.astype(float)
+        tmp[name.replace("_n", "_top3")] = (mask * top3).astype(float)
+    timed = ran & df["std_diff"].notna()
+    tmp["time_n"] = timed.astype(float)
+    tmp["time_sum"] = df["std_diff"].where(timed, 0.0)
+    winner = ran & (df["is_win"] == 1) & df["early_pos"].notna()
+    tmp["winner_n"] = winner.astype(float)
+    tmp["winner_sum"] = df["early_pos"].where(winner, 0.0)
+    tmp["race"] = 1.0
+    keys = ["race_date", "place_code"]
+    value_cols = [c for c in tmp.columns if c not in (*keys, "race_number")]
+    per_race = tmp.groupby([*keys, "race_number"], sort=True, dropna=True)[value_cols].sum()
+    per_race["race"] = 1.0
+    before = (per_race.groupby(level=[0, 1]).cumsum() - per_race).reset_index()
+    m = df[[*keys, "race_number"]].merge(before, on=[*keys, "race_number"], how="left")
+    m.index = df.index
+
+    def rate(name: str) -> pd.Series:
+        n = m[f"{name}_n"]
+        return (m[f"{name}_top3"] / n).where(n >= DAY_BIAS_MIN_SAMPLES)
+
+    df["day_prior_races"] = m["race"].fillna(0)
+    df["day_front_adv"] = rate("front") - rate("back")
+    df["day_front_excess"] = df["day_front_adv"] - df["course_front_adv"]
+    df["day_inner_adv"] = rate("inner") - rate("outer")
+    df["day_std_diff"] = (m["time_sum"] / m["time_n"]).where(m["time_n"] > 0)
+    df["day_winner_early_pos"] = (m["winner_sum"] / m["winner_n"]).where(m["winner_n"] > 0)
+    df["day_style_fit"] = (0.5 - df["early_pos_mean5"]) * df["day_front_adv"]
+    df["day_inner_fit"] = (0.5 - draw) * df["day_inner_adv"]
