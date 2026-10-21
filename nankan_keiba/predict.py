@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import pandas as pd
 
 from .client import NotFoundError, PoliteHttpClient
+from .collector import collect_pedigrees
 from .config import NANKAN_PLACES, race_list_url, race_result_url, shutuba_url
-from .features import ENTRY_COLUMNS, attach_pedigrees, build_features
+from .features import ENTRY_COLUMNS, attach_pedigrees, build_features, load_history, load_pedigrees
 from .model import RaceModel
 from .models import RaceResult
 from .parsers import ParseError, parse_result, parse_shutuba, parse_shutuba_ids
+from .storage import RaceStore
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +123,33 @@ def predict_cards(
     extra = targets[["race_id", "horse_number", "jockey_name", "win_odds", "popularity"]]
     out = pred.merge(info, on=["race_id", "horse_number"]).merge(extra, on=["race_id", "horse_number"])
     return out[OUTPUT_COLUMNS].sort_values(["race_id", "pred_rank"]).reset_index(drop=True)
+
+
+@dataclass
+class PredictionRun:
+    predictions: pd.DataFrame
+    same_day_races: int
+    fetched_pedigrees: int
+
+
+def run_prediction(client: PoliteHttpClient, db_path: Path, model: RaceModel, race_ids: list[str]) -> PredictionRun:
+    """出馬表・同日の前のレースの結果・未取得の血統を取得して予想する（CLI と Web 画面の共通処理）."""
+    history = load_history(db_path)
+    cards = fetch_cards(client, race_ids)
+    same_day = fetch_same_day_results(client, race_ids, set(history["race_id"]))
+    if same_day:
+        logger.info("当日の前のレースの結果 %d レース分を馬場傾向に使います", len(same_day))
+    horse_ids = [e.horse_id for r in [*cards, *same_day] for e in r.entries if e.horse_id]
+    store = RaceStore(db_path)
+    try:
+        missing = store.missing_pedigrees(horse_ids)
+        if missing:
+            logger.info("血統が未取得の馬 %d 頭の血統表を取得します", len(missing))
+            collect_pedigrees(client, store, missing)
+    finally:
+        store.close()
+    pred = predict_cards(model, history, cards, same_day=same_day, pedigrees=load_pedigrees(db_path))
+    return PredictionRun(pred, len(same_day), len(missing))
 
 
 def format_predictions(pred: pd.DataFrame) -> str:
