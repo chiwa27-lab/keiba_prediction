@@ -41,11 +41,11 @@ def parse_race_ids(html: str, kaisai_id: str) -> list[str]:
 
 
 def parse_shutuba_ids(html: str, kaisai_date: str, place_codes: Iterable[str] = NANKAN_PLACES) -> list[str]:
-    """レース一覧から、指定日・対象競馬場の出馬表 race_id を抽出する."""
+    """レース一覧から、指定日・対象競馬場の race_id を抽出する（発走後で結果ページへのリンクになったレースも含む）."""
     codes = set(place_codes)
     return sorted(
         rid
-        for rid in set(_SHUTUBA_LINK_RE.findall(html))
+        for rid in {*_SHUTUBA_LINK_RE.findall(html), *_RESULT_LINK_RE.findall(html)}
         if rid[4:6] in codes and rid[0:4] == kaisai_date[0:4] and rid[6:10] == kaisai_date[4:8]
     )
 

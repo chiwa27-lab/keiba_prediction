@@ -98,6 +98,15 @@ def test_parse_shutuba_ids_filters_date_and_place() -> None:
     assert parse_shutuba_ids(html, "20261012") == ["202645101201", "202645101202"]
 
 
+def test_parse_shutuba_ids_includes_finished_races() -> None:
+    html = (
+        '<a href="../race/result.html?race_id=202642102001">1R</a>'
+        '<a href="../race/shutuba.html?race_id=202642102012">12R</a>'
+        '<a href="../race/result.html?race_id=202642101901">前日</a>'
+    )
+    assert parse_shutuba_ids(html, "20261020") == ["202642102001", "202642102012"]
+
+
 def test_parse_shutuba() -> None:
     card = parse_shutuba((FIXTURES / "shutuba.html").read_text(encoding="utf-8"), "202645101201")
     race = card.race
