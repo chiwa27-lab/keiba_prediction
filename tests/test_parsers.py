@@ -125,6 +125,12 @@ def test_parse_shutuba() -> None:
     assert scratched.finish_status == "取消" and scratched.win_odds is None
 
 
+def test_parse_shutuba_reads_live_odds_column() -> None:
+    html = (FIXTURES / "shutuba.html").read_text(encoding="utf-8").replace("<th>予想<br>オッズ</th>", "<th>オッズ</th>")
+    first = parse_shutuba(html, "202645101201").entries[0]
+    assert (first.win_odds, first.popularity) == (2.5, 1)
+
+
 def test_parse_pedigree() -> None:
     ped = parse_pedigree((FIXTURES / "pedigree.html").read_text(encoding="utf-8"), "2022105287")
     assert ped == Pedigree(

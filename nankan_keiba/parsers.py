@@ -54,7 +54,7 @@ def parse_shutuba(html: str, race_id: str) -> RaceResult:
     """出馬表を、着順が空の RaceResult として読み取る.
 
     出走予定の馬は ``finish_status`` が空文字、取消・除外の馬はその文字列になる。
-    ``win_odds`` / ``popularity`` は netkeiba の予想オッズ・人気（確定値ではない）。
+    ``win_odds`` / ``popularity`` は、発売前は netkeiba の予想オッズ・人気、発売後はその時点のオッズ・人気。
     """
     soup = BeautifulSoup(html, "lxml")
     table = soup.select_one("table.ShutubaTable")
@@ -79,7 +79,7 @@ def parse_shutuba(html: str, race_id: str) -> RaceResult:
         "jockey": col("騎手"),
         "trainer": col("厩舎"),
         "weight": col("馬体重"),
-        "odds": col("予想オッズ"),
+        "odds": col("予想オッズ") if col("予想オッズ") is not None else col("オッズ"),
         "ninki": col("人気"),
     }
     entries: list[ResultEntry] = []
