@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+web = [
+    "streamlit==1.65.0",
+]
 dev = [
     "pytest==8.3.3",
     "ruff==0.7.4",
