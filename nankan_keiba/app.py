@@ -15,6 +15,7 @@ from nankan_keiba.features import build_features, load_history, load_win_payouts
 from nankan_keiba.model import RaceModel
 from nankan_keiba.model import train as train_model
 from nankan_keiba.predict import find_race_ids, run_prediction
+from nankan_keiba.simulate import leaks_training, run_simulation
 from nankan_keiba.storage import RaceStore
 from nankan_keiba.webapp import jst_today, last_race_date, load_actual_results, race_label, race_table, update_period
 
@@ -183,7 +184,14 @@ def main() -> None:
     st.title("南関東競馬 着順予想")
     st.caption("netkeiba の公開ページから低負荷で取得したデータで予想します。データと予想は個人利用に限ります。")
     _sidebar(args)
+    predict_tab, simulate_tab = st.tabs(["予想", "回収率の答え合わせ"])
+    with predict_tab:
+        _prediction_page(args)
+    with simulate_tab:
+        _simulation_page(args)
 
+
+def _prediction_page(args: argparse.Namespace) -> None:
     kaisai = st.date_input("開催日", value=jst_today(), format="YYYY/MM/DD")
     try:
         race_ids = _race_ids(kaisai.strftime("%Y%m%d"), str(args.cache_dir))
@@ -214,6 +222,79 @@ def main() -> None:
     if st.button("予想する", type="primary", disabled=not selected, key="predict"):
         _predict(args, model, list(selected))
     _show_result()
+
+
+def _simulation_page(args: argparse.Namespace) -> None:
+    st.caption(
+        "DB に保存済みのレース結果と払戻を使い、予想どおりに 1 点 100 円で買った場合の回収率を計算します"
+        "（netkeiba にはアクセスしません）。同じ日の前のレースの結果は使う、発走直前の予想と同じ条件です。"
+    )
+    last = last_race_date(args.db)
+    default = last or jst_today()
+    period = st.date_input("期間", value=(default, default), format="YYYY/MM/DD", key="sim_period")
+    if not isinstance(period, tuple) or len(period) != 2:
+        st.info("開始日と終了日を選んでください")
+        return
+    start, end = period
+    model_key = st.radio(
+        "モデル", list(MODEL_LABELS), format_func=MODEL_LABELS.__getitem__, horizontal=True, key="sim_model"
+    )
+    model = _model(args.model_dir if model_key == "plain" else args.odds_model_dir)
+    if model is None:
+        st.error("学習済みモデルがありません。サイドバーの「モデルを学習し直す」を押してください")
+        return
+    if st.button("答え合わせする", type="primary", key="simulate"):
+        try:
+            with st.spinner("保存済みの結果で予想し直しています…（1〜2 分かかります）"):
+                sim = run_simulation(args.db, model, start, end)
+        except FileNotFoundError as exc:
+            st.error(f"{exc}。サイドバーの「前日までの結果と血統を取り込む」を押してください")
+            return
+        st.session_state["simulation"] = (sim, start, end, leaks_training(model, end))
+    _show_simulation()
+
+
+def _show_simulation() -> None:
+    result = st.session_state.get("simulation")
+    if result is None:
+        return
+    sim, start, end, leaked = result
+    if sim.summary.empty:
+        st.info(
+            "この期間のレース結果が DB にありません。" "サイドバーの「前日までの結果と血統を取り込む」を押してください"
+        )
+        return
+    st.subheader(f"{start:%Y/%m/%d}〜{end:%Y/%m/%d}（{sim.details['race_id'].nunique()} レース）")
+    if leaked:
+        st.warning("この期間はモデルの学習データに含まれているため、実際より成績が良く出ます")
+    st.dataframe(
+        sim.summary,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "投資額": st.column_config.NumberColumn(format="%d 円"),
+            "払戻額": st.column_config.NumberColumn(format="%d 円"),
+            "回収率": st.column_config.NumberColumn(format="%.1f%%"),
+            "的中率": st.column_config.NumberColumn(format="%.1f%%"),
+        },
+    )
+    st.caption(
+        "◎○▲△ はモデルの予想 1〜4 位。3 連複は ◎・○ と ◎・▲ の 2 頭軸からの流し（重なる買い目は 1 点）、"
+        "3 連単は 1 着 ◎・2 着 ○ か ▲・3 着 残り全頭です。"
+    )
+    details = sim.details.assign(レース=sim.details["race_id"].map(race_label))
+    st.download_button(
+        "レース別の収支を CSV でダウンロード",
+        details.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"simulation_{start:%Y%m%d}_{end:%Y%m%d}.csv",
+        mime="text/csv",
+    )
+    with st.expander("レース別の収支"):
+        st.dataframe(
+            details[["race_date", "レース", "券種", "購入点数", "投資額", "払戻額", "的中"]],
+            hide_index=True,
+            width="stretch",
+        )
 
 
 main()

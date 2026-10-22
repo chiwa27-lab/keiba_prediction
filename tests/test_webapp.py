@@ -9,8 +9,10 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 import nankan_keiba.predict as predict_module
+import nankan_keiba.simulate as simulate_module
 from nankan_keiba.model import RaceModel
 from nankan_keiba.predict import OUTPUT_COLUMNS, PredictionRun
+from nankan_keiba.simulate import Simulation, settle
 from nankan_keiba.webapp import jst_today, last_race_date, load_actual_results, race_label, race_table, update_period
 
 APP = str(Path(__file__).resolve().parents[1] / "nankan_keiba" / "app.py")
@@ -90,3 +92,35 @@ def test_app_predicts_selected_date(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert calls == [["202642102101"]]
     assert at.subheader[0].value.startswith("浦和 1R")
     assert len(at.dataframe) == 1
+
+
+def test_app_simulates_saved_races(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    model_dir = tmp_path / "data" / "model"
+    model_dir.mkdir(parents=True)
+    (model_dir / "meta.json").write_text("{}")
+    model = RaceModel({}, [], False, {"trained_until": "2026-10-20"})
+    pred = _pred()
+    payouts = pd.DataFrame(
+        [("202642102101", "単勝", "2", 350)],
+        columns=["race_id", "bet_type", "combination", "payout_yen"],
+    )
+    calls: list[tuple[date, date]] = []
+
+    def fake_sim(db: Path, m: RaceModel, start: date, end: date) -> Simulation:
+        calls.append((start, end))
+        summary, details = settle(pred, payouts)
+        return Simulation(pred, summary, details)
+
+    monkeypatch.setattr(RaceModel, "load", classmethod(lambda cls, path: model))
+    monkeypatch.setattr(predict_module, "find_race_ids", lambda client, d, places=None: [])
+    monkeypatch.setattr(simulate_module, "run_simulation", fake_sim)
+
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    assert not at.exception
+    at.button(key="simulate").click().run()
+    assert not at.exception
+    assert len(calls) == 1
+    summary = at.dataframe[0].value
+    assert list(summary["券種"]) == ["単勝", "合計"]
+    assert summary["回収率"].iloc[0] == 350.0
