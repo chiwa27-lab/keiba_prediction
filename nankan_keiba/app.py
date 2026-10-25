@@ -364,16 +364,22 @@ def _vote_page(args: argparse.Namespace) -> None:
         st.error("1日の上限金額を超えます。レースや券種を減らすか、設定で上限を変えてください")
     if not settings.complete:
         st.error("「SPAT4 の設定」で加入者番号と利用者IDを保存してください")
+    too_many = len(checked.new_tickets) > spat4_browser.MAX_TICKETS
+    if too_many:
+        st.error(f"SPAT4 で一度に入力できるのは {spat4_browser.MAX_TICKETS} 点までです。レースや券種を減らしてください")
     pin = st.text_input("暗証番号（保存しません）", type="password", max_chars=4, key="spat4_pin")
-    ready = settings.complete and not checked.over_limit and pin.isdigit() and len(pin) == 4
+    ready = settings.complete and not checked.over_limit and not too_many and pin.isdigit() and len(pin) == 4
     if st.button("SPAT4 の画面に入力する", type="primary", disabled=not ready, key="spat4_fill"):
         try:
-            spat4_browser.enter_votes(settings, pin, checked.new_tickets)
+            spat4_browser.enter_votes(settings, pin, checked.new_tickets, data_dir)
         except spat4_browser.Spat4BrowserError as exc:
             st.error(str(exc))
         else:
             spat4.record(data_dir, checked.new_tickets, today)
-            st.success("入力しました。開いた Chrome の確認画面で内容を確かめ、投票ボタンを押してください")
+            st.success(
+                "入力しました。暗証番号と合計金額も入力済みです。"
+                "開いた Chrome の確認画面で内容を確かめ、投票ボタンを押してください"
+            )
 
 
 main()
