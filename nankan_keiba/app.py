@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
+from datetime import date
 from pathlib import Path
 
 import streamlit as st
@@ -134,7 +135,13 @@ def _predict(args: argparse.Namespace, model: RaceModel, race_ids: list[str]) ->
     try:
         with st.spinner("出馬表などを取得して予想しています…（1〜2 分かかります）"):
             run = run_prediction(_client(str(args.cache_dir)), args.db, model, race_ids)
-        st.session_state["result"] = (run.predictions, load_actual_results(args.db, race_ids), run.same_day_races)
+        latest = max(date(int(r[0:4]), int(r[6:8]), int(r[8:10])) for r in race_ids)
+        st.session_state["result"] = (
+            run.predictions,
+            load_actual_results(args.db, race_ids),
+            run.same_day_races,
+            leaks_training(model, latest),
+        )
     except (AccessDeniedError, FetchError) as exc:
         st.error(f"netkeiba から取得できませんでした（{exc}）。時間をおいて試してください")
     except FileNotFoundError as exc:
@@ -147,7 +154,7 @@ def _show_result() -> None:
     result = st.session_state.get("result")
     if result is None:
         return
-    pred, actual, same_day_races = result
+    pred, actual, same_day_races, leaked = result
     if pred.empty:
         st.info("予想できる出走馬がいませんでした")
         return
@@ -160,9 +167,8 @@ def _show_result() -> None:
         mime="text/csv",
     )
     if not actual.empty:
-        st.caption(
-            "結果が出ているレースは着順も表示しています。過去の日付はその日の結果も学習に使っているため、実際より当たって見えます。"
-        )
+        note = "この日の結果もモデルの学習に使っているため、実際より当たって見えます。" if leaked else ""
+        st.caption(f"結果が出ているレースは着順も表示しています。{note}")
     for race_id, race in pred.groupby("race_id", sort=True):
         head = race.iloc[0]
         st.subheader(f"{race_label(str(race_id))}　{head['race_name']}（{int(head['distance'])}m）")
