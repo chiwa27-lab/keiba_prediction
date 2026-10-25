@@ -10,13 +10,14 @@ from pathlib import Path
 
 import streamlit as st
 
+from nankan_keiba import spat4, spat4_browser
 from nankan_keiba.client import AccessDeniedError, FetchError, PoliteHttpClient, RequestBudgetExceeded
 from nankan_keiba.collector import Collector, collect_pedigrees
 from nankan_keiba.features import build_features, load_history, load_win_payouts
 from nankan_keiba.model import RaceModel
 from nankan_keiba.model import train as train_model
 from nankan_keiba.predict import find_race_ids, run_prediction
-from nankan_keiba.simulate import leaks_training, run_simulation
+from nankan_keiba.simulate import BET_TYPES, STAKE_YEN, leaks_training, run_simulation
 from nankan_keiba.storage import RaceStore
 from nankan_keiba.webapp import jst_today, last_race_date, load_actual_results, race_label, race_table, update_period
 
@@ -190,11 +191,13 @@ def main() -> None:
     st.title("南関東競馬 着順予想")
     st.caption("netkeiba の公開ページから低負荷で取得したデータで予想します。データと予想は個人利用に限ります。")
     _sidebar(args)
-    predict_tab, simulate_tab = st.tabs(["予想", "回収率の答え合わせ"])
+    predict_tab, simulate_tab, vote_tab = st.tabs(["予想", "回収率の答え合わせ", "SPAT4 投票"])
     with predict_tab:
         _prediction_page(args)
     with simulate_tab:
         _simulation_page(args)
+    with vote_tab:
+        _vote_page(args)
 
 
 def _prediction_page(args: argparse.Namespace) -> None:
@@ -301,6 +304,76 @@ def _show_simulation() -> None:
             hide_index=True,
             width="stretch",
         )
+
+
+def _spat4_settings_form(data_dir: Path, settings: spat4.Spat4Settings) -> None:
+    with st.expander("SPAT4 の設定", expanded=not settings.complete), st.form("spat4_settings"):
+        st.caption("この PC の data フォルダにだけ保存します。暗証番号は保存しません。")
+        member = st.text_input("加入者番号", value=settings.member_number, type="password")
+        user_id = st.text_input("利用者ID", value=settings.user_id, type="password")
+        limit = st.number_input(
+            "1日の上限金額（円）", min_value=STAKE_YEN, step=STAKE_YEN, value=settings.daily_limit_yen
+        )
+        if st.form_submit_button("保存する"):
+            try:
+                spat4.save_settings(data_dir, spat4.Spat4Settings(member.strip(), user_id.strip(), int(limit)))
+            except ValueError as exc:
+                st.error(str(exc))
+            else:
+                st.success("保存しました")
+                st.rerun()
+
+
+def _vote_page(args: argparse.Namespace) -> None:
+    data_dir = args.db.parent
+    settings = spat4.load_settings(data_dir)
+    st.caption(
+        "予想の買い目を SPAT4 の画面に入力し、最終確認画面で止めます。"
+        "内容を確かめて、投票ボタンはご自身で押してください。1 点 100 円です。"
+    )
+    _spat4_settings_form(data_dir, settings)
+    result = st.session_state.get("result")
+    if result is None or result[0].empty:
+        st.info("先に「予想」タブで予想してください")
+        return
+    pred = result[0]
+    race_ids = sorted(pred["race_id"].unique())
+    races = st.multiselect("買うレース", race_ids, default=race_ids[:1], format_func=race_label, key="vote_races")
+    bet_types = st.multiselect(
+        "券種",
+        list(BET_TYPES),
+        default=["単勝"],
+        format_func=lambda b: f"{b}（{BET_TYPES[b]}）",
+        key="vote_bet_types",
+    )
+    rows = spat4.build_tickets(pred, list(races), list(bet_types))
+    today = jst_today()
+    checked = spat4.check(rows, spat4.load_log(data_dir, today), settings.daily_limit_yen)
+    if not checked.duplicates.empty:
+        st.warning(f"今日すでに入力した買い目 {len(checked.duplicates)} 点は除きました")
+    if checked.new_tickets.empty:
+        st.info("入力する買い目がありません")
+        return
+    shown = checked.new_tickets.assign(レース=checked.new_tickets["race_id"].map(race_label))
+    st.dataframe(shown[["レース", "券種", "買い目", "金額"]], hide_index=True, width="stretch")
+    st.write(
+        f"合計 {len(checked.new_tickets)} 点 {checked.total_yen:,} 円"
+        f"（今日の入力済み {checked.used_today_yen:,} 円 / 上限 {checked.limit_yen:,} 円）"
+    )
+    if checked.over_limit:
+        st.error("1日の上限金額を超えます。レースや券種を減らすか、設定で上限を変えてください")
+    if not settings.complete:
+        st.error("「SPAT4 の設定」で加入者番号と利用者IDを保存してください")
+    pin = st.text_input("暗証番号（保存しません）", type="password", max_chars=4, key="spat4_pin")
+    ready = settings.complete and not checked.over_limit and pin.isdigit() and len(pin) == 4
+    if st.button("SPAT4 の画面に入力する", type="primary", disabled=not ready, key="spat4_fill"):
+        try:
+            spat4_browser.enter_votes(settings, pin, checked.new_tickets)
+        except spat4_browser.Spat4BrowserError as exc:
+            st.error(str(exc))
+        else:
+            spat4.record(data_dir, checked.new_tickets, today)
+            st.success("入力しました。開いた Chrome の確認画面で内容を確かめ、投票ボタンを押してください")
 
 
 main()
