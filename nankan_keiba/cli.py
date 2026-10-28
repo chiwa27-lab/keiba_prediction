@@ -17,6 +17,7 @@ from .features import build_features, load_history, load_win_payouts
 from .model import OBJECTIVES, RaceModel
 from .model import train as train_model
 from .predict import find_race_ids, format_predictions, run_prediction
+from .simulate import format_summary, leaks_training, run_simulation
 from .storage import RaceStore
 
 logger = logging.getLogger("nankan_keiba")
@@ -113,6 +114,13 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
     predict.add_argument("--interval", type=float, default=DEFAULT_INTERVAL_SEC)
     predict.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
+
+    simulate = sub.add_parser("simulate", help="保存済みの結果・払戻で、予想どおりに買った場合の回収率を答え合わせ")
+    simulate.add_argument("--from", dest="start", type=_parse_date, required=True, help="開始日 YYYY-MM-DD")
+    simulate.add_argument("--to", dest="end", type=_parse_date, help="終了日 YYYY-MM-DD（既定: 開始日と同じ）")
+    simulate.add_argument("--db", type=Path, default=Path("data/nankan.sqlite"))
+    simulate.add_argument("--model-dir", type=Path, default=Path("data/model"))
+    simulate.add_argument("--out", type=Path, help="レース別・券種別の収支を書き出す CSV")
 
     web = sub.add_parser("web", help="ブラウザで予想する画面を起動")
     web.add_argument("--db", type=Path, default=Path("data/nankan.sqlite"))
@@ -260,6 +268,23 @@ def _run_predict(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_simulate(args: argparse.Namespace) -> int:
+    end = args.end or args.start
+    model = RaceModel.load(args.model_dir)
+    sim = run_simulation(args.db, model, args.start, end)
+    if sim.summary.empty:
+        logger.error("%s〜%s の結果・払戻が DB にありません（先に collect で取り込んでください）", args.start, end)
+        return 1
+    if leaks_training(model, end):
+        logger.warning("この期間はモデルの学習データに含まれているため、実際より成績が良く出ます")
+    print(format_summary(sim.summary))
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        sim.details.to_csv(args.out, index=False, encoding="utf-8-sig")
+        logger.info("レース別の収支を保存しました: %s", args.out)
+    return 0
+
+
 def _run_web(args: argparse.Namespace) -> int:
     app = Path(__file__).with_name("app.py")
     command = [
@@ -301,6 +326,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_predict(args)
     if args.command == "pedigree":
         return _run_pedigree(args)
+    if args.command == "simulate":
+        return _run_simulate(args)
     if args.command == "web":
         return _run_web(args)
     return _run_export(args)
