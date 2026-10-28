@@ -98,6 +98,15 @@ def test_parse_shutuba_ids_filters_date_and_place() -> None:
     assert parse_shutuba_ids(html, "20261012") == ["202645101201", "202645101202"]
 
 
+def test_parse_shutuba_ids_includes_finished_races() -> None:
+    html = (
+        '<a href="../race/result.html?race_id=202642102001">1R</a>'
+        '<a href="../race/shutuba.html?race_id=202642102012">12R</a>'
+        '<a href="../race/result.html?race_id=202642101901">前日</a>'
+    )
+    assert parse_shutuba_ids(html, "20261020") == ["202642102001", "202642102012"]
+
+
 def test_parse_shutuba() -> None:
     card = parse_shutuba((FIXTURES / "shutuba.html").read_text(encoding="utf-8"), "202645101201")
     race = card.race
@@ -114,6 +123,12 @@ def test_parse_shutuba() -> None:
     assert (first.horse_weight, first.horse_weight_diff, first.win_odds, first.popularity) == (452, 4, 2.5, 1)
     assert second.horse_weight is None
     assert scratched.finish_status == "取消" and scratched.win_odds is None
+
+
+def test_parse_shutuba_reads_live_odds_column() -> None:
+    html = (FIXTURES / "shutuba.html").read_text(encoding="utf-8").replace("<th>予想<br>オッズ</th>", "<th>オッズ</th>")
+    first = parse_shutuba(html, "202645101201").entries[0]
+    assert (first.win_odds, first.popularity) == (2.5, 1)
 
 
 def test_parse_pedigree() -> None:

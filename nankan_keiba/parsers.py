@@ -41,11 +41,11 @@ def parse_race_ids(html: str, kaisai_id: str) -> list[str]:
 
 
 def parse_shutuba_ids(html: str, kaisai_date: str, place_codes: Iterable[str] = NANKAN_PLACES) -> list[str]:
-    """レース一覧から、指定日・対象競馬場の出馬表 race_id を抽出する."""
+    """レース一覧から、指定日・対象競馬場の race_id を抽出する（発走後で結果ページへのリンクになったレースも含む）."""
     codes = set(place_codes)
     return sorted(
         rid
-        for rid in set(_SHUTUBA_LINK_RE.findall(html))
+        for rid in {*_SHUTUBA_LINK_RE.findall(html), *_RESULT_LINK_RE.findall(html)}
         if rid[4:6] in codes and rid[0:4] == kaisai_date[0:4] and rid[6:10] == kaisai_date[4:8]
     )
 
@@ -54,7 +54,7 @@ def parse_shutuba(html: str, race_id: str) -> RaceResult:
     """出馬表を、着順が空の RaceResult として読み取る.
 
     出走予定の馬は ``finish_status`` が空文字、取消・除外の馬はその文字列になる。
-    ``win_odds`` / ``popularity`` は netkeiba の予想オッズ・人気（確定値ではない）。
+    ``win_odds`` / ``popularity`` は、発売前は netkeiba の予想オッズ・人気、発売後はその時点のオッズ・人気。
     """
     soup = BeautifulSoup(html, "lxml")
     table = soup.select_one("table.ShutubaTable")
@@ -79,7 +79,7 @@ def parse_shutuba(html: str, race_id: str) -> RaceResult:
         "jockey": col("騎手"),
         "trainer": col("厩舎"),
         "weight": col("馬体重"),
-        "odds": col("予想オッズ"),
+        "odds": col("予想オッズ") if col("予想オッズ") is not None else col("オッズ"),
         "ninki": col("人気"),
     }
     entries: list[ResultEntry] = []

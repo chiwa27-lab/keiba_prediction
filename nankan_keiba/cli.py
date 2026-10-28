@@ -3,17 +3,20 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import subprocess
 import sys
+import threading
+import webbrowser
 from datetime import date
 from pathlib import Path
 
 from .client import AccessDeniedError, FetchError, PoliteHttpClient, RequestBudgetExceeded
 from .collector import Collector, collect_pedigrees, default_period
 from .config import DEFAULT_INTERVAL_SEC, DEFAULT_JITTER_SEC, DEFAULT_USER_AGENT, MIN_INTERVAL_SEC, NANKAN_PLACES
-from .features import build_features, load_history, load_pedigrees, load_win_payouts
+from .features import build_features, load_history, load_win_payouts
 from .model import OBJECTIVES, RaceModel
 from .model import train as train_model
-from .predict import fetch_cards, fetch_same_day_results, find_race_ids, format_predictions, predict_cards
+from .predict import find_race_ids, format_predictions, run_prediction
 from .storage import RaceStore
 
 logger = logging.getLogger("nankan_keiba")
@@ -110,6 +113,14 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
     predict.add_argument("--interval", type=float, default=DEFAULT_INTERVAL_SEC)
     predict.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
+
+    web = sub.add_parser("web", help="ブラウザで予想する画面を起動")
+    web.add_argument("--db", type=Path, default=Path("data/nankan.sqlite"))
+    web.add_argument("--model-dir", type=Path, default=Path("data/model"))
+    web.add_argument("--odds-model-dir", type=Path, default=Path("data/model_odds"))
+    web.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
+    web.add_argument("--port", type=int, default=8501)
+    web.add_argument("--no-browser", action="store_true", help="起動時にブラウザを開かない")
     return parser
 
 
@@ -225,7 +236,6 @@ def _run_train(args: argparse.Namespace) -> int:
 def _run_predict(args: argparse.Namespace) -> int:
     model = RaceModel.load(args.model_dir)
     client = PoliteHttpClient(args.cache_dir, interval=args.interval, user_agent=args.user_agent)
-    history = load_history(args.db)
     try:
         if args.date:
             race_ids = find_race_ids(client, args.date.strftime("%Y%m%d"), args.places)
@@ -234,19 +244,7 @@ def _run_predict(args: argparse.Namespace) -> int:
                 return 1
         else:
             race_ids = args.race_id
-        cards = fetch_cards(client, race_ids)
-        same_day = fetch_same_day_results(client, race_ids, set(history["race_id"]))
-        if same_day:
-            logger.info("当日の前のレースの結果 %d レース分を馬場傾向に使います", len(same_day))
-        horse_ids = [e.horse_id for r in [*cards, *same_day] for e in r.entries if e.horse_id]
-        store = RaceStore(args.db)
-        try:
-            missing = store.missing_pedigrees(horse_ids)
-            if missing:
-                logger.info("血統が未取得の馬 %d 頭の血統表を取得します", len(missing))
-                collect_pedigrees(client, store, missing)
-        finally:
-            store.close()
+        pred = run_prediction(client, args.db, model, race_ids).predictions
     except AccessDeniedError as exc:
         logger.error("%s", exc)
         return 2
@@ -254,13 +252,39 @@ def _run_predict(args: argparse.Namespace) -> int:
         logger.error("%s", exc)
         return 1
 
-    pred = predict_cards(model, history, cards, same_day=same_day, pedigrees=load_pedigrees(args.db))
     out = args.out or Path("data/predictions") / f"{args.date or race_ids[0]}.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     pred.to_csv(out, index=False, encoding="utf-8-sig")
     print(format_predictions(pred))
     logger.info("予想結果を保存しました: %s", out)
     return 0
+
+
+def _run_web(args: argparse.Namespace) -> int:
+    app = Path(__file__).with_name("app.py")
+    command = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app),
+        "--server.address",
+        "localhost",
+        "--server.port",
+        str(args.port),
+        "--server.headless",
+        "true",
+        "--browser.gatherUsageStats",
+        "false",
+        "--",
+        *("--db", str(args.db), "--model-dir", str(args.model_dir)),
+        *("--odds-model-dir", str(args.odds_model_dir), "--cache-dir", str(args.cache_dir)),
+    ]
+    url = f"http://localhost:{args.port}"
+    print(f"ブラウザで {url} を開いてください（終了するときは Ctrl+C）")
+    if not args.no_browser:
+        threading.Timer(3.0, webbrowser.open, args=(url,)).start()
+    return subprocess.call(command)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -277,6 +301,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_predict(args)
     if args.command == "pedigree":
         return _run_pedigree(args)
+    if args.command == "web":
+        return _run_web(args)
     return _run_export(args)
 
 
