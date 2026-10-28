@@ -20,6 +20,7 @@ from .simulate import BET_TYPES, ORDERED_BET_TYPES, STAKE_YEN, tickets
 DEFAULT_DAILY_LIMIT_YEN = 5000
 TICKET_COLUMNS = ["race_id", "券種", "買い目", "金額"]
 
+USER_ID_MIN_LEN = 8
 USER_ID_MAX_LEN = 32
 
 
@@ -53,8 +54,14 @@ def load_settings(data_dir: Path) -> Spat4Settings:
 def save_settings(data_dir: Path, settings: Spat4Settings) -> None:
     if not settings.member_number.isdigit():
         raise ValueError("加入者番号は数字で入力してください")
-    if not (settings.user_id.isascii() and settings.user_id.isalnum() and len(settings.user_id) <= USER_ID_MAX_LEN):
-        raise ValueError(f"利用者IDは半角英数字（{USER_ID_MAX_LEN} 文字まで）で入力してください")
+    user_id = settings.user_id
+    if not (
+        user_id.isascii()
+        and user_id.isprintable()
+        and " " not in user_id
+        and USER_ID_MIN_LEN <= len(user_id) <= USER_ID_MAX_LEN
+    ):
+        raise ValueError(f"利用者IDは半角英数記号の {USER_ID_MIN_LEN}〜{USER_ID_MAX_LEN} 文字で入力してください")
     if settings.daily_limit_yen < STAKE_YEN:
         raise ValueError(f"1日の上限は {STAKE_YEN} 円以上にしてください")
     data_dir.mkdir(parents=True, exist_ok=True)

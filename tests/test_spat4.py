@@ -29,17 +29,17 @@ def _pred() -> pd.DataFrame:
 
 def test_settings_roundtrip_and_validation(tmp_path: Path) -> None:
     assert not load_settings(tmp_path).complete
-    save_settings(tmp_path, Spat4Settings("12345678", "1234", 3000))
+    save_settings(tmp_path, Spat4Settings("12345678", "abcd1234", 3000))
     loaded = load_settings(tmp_path)
-    assert loaded == Spat4Settings("12345678", "1234", 3000)
+    assert loaded == Spat4Settings("12345678", "abcd1234", 3000)
     assert loaded.complete
     with pytest.raises(ValueError):
-        save_settings(tmp_path, Spat4Settings("abc", "1234"))
+        save_settings(tmp_path, Spat4Settings("abc", "abcd1234"))
     with pytest.raises(ValueError):
         save_settings(tmp_path, Spat4Settings("1", "2", 0))
-    save_settings(tmp_path, Spat4Settings("12345678", "abc123XYZ"))
-    assert load_settings(tmp_path).user_id == "abc123XYZ"
-    for bad in ["ａｂｃ", "abc-123", "a" * 33]:
+    save_settings(tmp_path, Spat4Settings("12345678", "abc-123_XYZ"))
+    assert load_settings(tmp_path).user_id == "abc-123_XYZ"
+    for bad in ["ａｂｃｄ１２３４", "abc 1234", "abc123", "a" * 33]:
         with pytest.raises(ValueError, match="利用者ID"):
             save_settings(tmp_path, Spat4Settings("12345678", bad))
 

@@ -143,11 +143,16 @@ VOTE_LINK = "a[target=spat4_LiveVote] span.btn_live"
 
 def _find_menu(context: Any, timeout_ms: int = 0) -> Any:
     """ログイン済みのメニュー画面（通常投票ボタンがあるタブ）を探す。ログインすると別のタブに開くことがある."""
+    from playwright.sync_api import Error as PlaywrightError
+
     deadline = time.monotonic() + timeout_ms / 1000
     while True:
         for page in context.pages:
-            if "spat4.jp" in page.url and page.locator(VOTE_LINK).count():
-                return page
+            try:
+                if "spat4.jp" in page.url and page.locator(VOTE_LINK).count():
+                    return page
+            except PlaywrightError:
+                pass  # ログイン直後など、画面の切り替え中は読めない
         if time.monotonic() >= deadline:
             return None
         time.sleep(0.5)
@@ -162,13 +167,16 @@ def _login(context: Any, settings: Spat4Settings) -> Any:
         raise Spat4BrowserError(
             "SPAT4 のメニュー画面が見つかりません。SPAT4 用の Chrome でログインしてからやり直してください"
         )
-    if not settings.complete:
-        raise Spat4BrowserError(
-            "設定で加入者番号と利用者IDを保存するか、SPAT4 用の Chrome でログインしてからやり直してください"
-        )
-    page.fill("#MEMBERNUMR", settings.member_number)
-    page.fill("#MEMBERIDR", settings.user_id)
-    page.click("a.loginbtn")
+    # 「かんたんログイン」設定中は入力欄が無効になり、ログインボタンだけで入れる
+    if page.locator("#MEMBERNUMR").is_enabled():
+        if not settings.complete:
+            raise Spat4BrowserError(
+                "設定で加入者番号と利用者IDを保存するか、SPAT4 用の Chrome でログインしてからやり直してください"
+            )
+        page.fill("#MEMBERNUMR", settings.member_number)
+        page.fill("#MEMBERIDR", settings.user_id)
+    # ボタンの <a> は幅0で描画されていて普通のクリックが届かないため、click イベントを直接送る
+    page.dispatch_event("a.loginbtn", "click")
     menu = _find_menu(context, TIMEOUT_MS)
     if menu is None:
         raise Spat4BrowserError("SPAT4 にログインできませんでした。加入者番号と利用者IDを確かめてください")
