@@ -91,7 +91,7 @@ def test_app_predicts_selected_date(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert not at.exception
     assert calls == [["202642102101"]]
     assert at.subheader[0].value.startswith("浦和 1R")
-    assert len(at.dataframe) == 1
+    assert len(at.dataframe) == 2  # 予想表と、SPAT4 投票タブの買い目
 
 
 def test_app_simulates_saved_races(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,3 +124,27 @@ def test_app_simulates_saved_races(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     summary = at.dataframe[0].value
     assert list(summary["券種"]) == ["単勝", "合計"]
     assert summary["回収率"].iloc[0] == 350.0
+
+
+def test_app_vote_tab_previews_tickets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    model_dir = tmp_path / "data" / "model"
+    model_dir.mkdir(parents=True)
+    (model_dir / "meta.json").write_text("{}")
+    model = RaceModel({}, [], False, {"trained_until": "2026-10-20"})
+
+    def fake_run(client: object, db: Path, m: RaceModel, race_ids: list[str]) -> PredictionRun:
+        return PredictionRun(_pred(), 0, 0)
+
+    monkeypatch.setattr(RaceModel, "load", classmethod(lambda cls, path: model))
+    monkeypatch.setattr(predict_module, "find_race_ids", lambda client, d, places=None: ["202642102101"])
+    monkeypatch.setattr(predict_module, "run_prediction", fake_run)
+
+    at = AppTest.from_file(APP, default_timeout=30).run()
+    assert any("予想」タブで予想" in i.value for i in at.info)
+    at.button(key="predict").click().run()
+    assert not at.exception
+    tickets = at.dataframe[-1].value
+    assert tickets["買い目"].tolist() == ["2"]
+    assert at.button(key="spat4_fill").disabled
+    assert any("加入者番号と利用者ID" in e.value for e in at.error)

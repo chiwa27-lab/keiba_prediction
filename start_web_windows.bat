@@ -2,7 +2,7 @@
 rem Windows: double-click to start the prediction web page.
 cd /d "%~dp0"
 
-if not exist ".venv\setup_done.txt" (
+if not exist ".venv\setup_done_v2.txt" (
   echo First run: installing required software. This takes 3-10 minutes...
   if not exist ".venv\Scripts\python.exe" (
     py -3.12 -m venv .venv
@@ -12,7 +12,7 @@ if not exist ".venv\setup_done.txt" (
   ".venv\Scripts\python.exe" -m pip install --upgrade pip
   ".venv\Scripts\python.exe" -m pip install -e ".[web]"
   if errorlevel 1 goto failed
-  echo done> ".venv\setup_done.txt"
+  echo done> ".venv\setup_done_v2.txt"
 )
 
 if not exist "data\nankan.sqlite" (
