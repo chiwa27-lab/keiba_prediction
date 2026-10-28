@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
-from nankan_keiba.collector import Collector, default_period, iter_months
-from nankan_keiba.config import calendar_url, race_list_url, race_result_url
+from nankan_keiba.collector import Collector, collect_pedigrees, default_period, iter_months
+from nankan_keiba.config import calendar_url, horse_pedigree_url, race_list_url, race_result_url
+from nankan_keiba.models import Pedigree
 from nankan_keiba.storage import RaceStore
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -59,7 +60,7 @@ def test_collect_saves_races_and_skips_existing(tmp_path: Path) -> None:
     assert race_result_url("202544090101") not in [url for url, _ in client.requested]
 
     csv_paths = store.export_csv(tmp_path / "csv")
-    assert [p.name for p in csv_paths] == ["races.csv", "results.csv", "payouts.csv"]
+    assert [p.name for p in csv_paths] == ["races.csv", "results.csv", "payouts.csv", "pedigrees.csv"]
     store.close()
 
 
@@ -69,4 +70,26 @@ def test_collect_does_not_cache_current_month_calendar_and_clamps_end(tmp_path: 
     collector = Collector(client, store, today=date(2025, 9, 15))  # type: ignore[arg-type]
     collector.collect(date(2025, 9, 1), date(2025, 9, 30))
     assert client.requested == [(calendar_url(2025, 9), False)]
+    store.close()
+
+
+def test_collect_pedigrees_saves_and_skips_known_horses(tmp_path: Path) -> None:
+    pages = {horse_pedigree_url("h1"): (FIXTURES / "pedigree.html").read_text(encoding="utf-8")}
+    client = StubClient(pages)
+    store = RaceStore(tmp_path / "db.sqlite")
+    result_html = (FIXTURES / "result.html").read_text(encoding="utf-8")
+    client.pages[race_result_url("202544090101")] = result_html
+    Collector(client, store).collect_race("202544090101")  # type: ignore[arg-type]
+    in_db = store.horses_without_pedigree()
+    assert in_db and store.missing_pedigrees([*in_db, "", "h1"]) == sorted({*in_db, "h1"})
+
+    saved, failed = collect_pedigrees(client, store, ["h1", "h2"])  # type: ignore[arg-type]
+
+    assert (saved, failed) == (2, 1)
+    assert client.invalidated == [horse_pedigree_url("h2")]
+    assert store.missing_pedigrees(["h1", "h2", "h3"]) == ["h3"]
+    row = store.conn.execute("SELECT sire_name, damsire_name FROM pedigrees WHERE horse_id = 'h1'").fetchone()
+    assert row == ("テストサイアー", "テストダムサイアー")
+    store.save_pedigree(Pedigree("h2", sire_id="s9"))
+    assert store.conn.execute("SELECT sire_id FROM pedigrees WHERE horse_id = 'h2'").fetchone() == ("s9",)
     store.close()

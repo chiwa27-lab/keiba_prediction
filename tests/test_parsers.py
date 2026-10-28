@@ -3,7 +3,16 @@ from pathlib import Path
 
 import pytest
 
-from nankan_keiba.parsers import ParseError, parse_calendar, parse_race_ids, parse_result
+from nankan_keiba.models import Pedigree
+from nankan_keiba.parsers import (
+    ParseError,
+    parse_calendar,
+    parse_pedigree,
+    parse_race_ids,
+    parse_result,
+    parse_shutuba,
+    parse_shutuba_ids,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -82,3 +91,47 @@ def test_parse_result_payouts() -> None:
 def test_parse_result_without_table_raises() -> None:
     with pytest.raises(ParseError):
         parse_result("<html><body>まだ結果はありません</body></html>", "202544090111")
+
+
+def test_parse_shutuba_ids_filters_date_and_place() -> None:
+    html = (FIXTURES / "race_list_upcoming.html").read_text(encoding="utf-8")
+    assert parse_shutuba_ids(html, "20261012") == ["202645101201", "202645101202"]
+
+
+def test_parse_shutuba() -> None:
+    card = parse_shutuba((FIXTURES / "shutuba.html").read_text(encoding="utf-8"), "202645101201")
+    race = card.race
+    assert (race.place_name, race.distance, race.race_class, race.track_condition) == (
+        "川崎",
+        1400,
+        "サラ系一般 C3",
+        None,
+    )
+    first, second, scratched = card.entries
+    assert first.finish_status == "" and first.finish_position is None
+    assert (first.horse_id, first.horse_name, first.sex, first.age) == ("2021100001", "テストホースA", "牝", 4)
+    assert (first.jockey_id, first.trainer_id, first.trainer_affiliation) == ("05380", "a02af", "川崎")
+    assert (first.horse_weight, first.horse_weight_diff, first.win_odds, first.popularity) == (452, 4, 2.5, 1)
+    assert second.horse_weight is None
+    assert scratched.finish_status == "取消" and scratched.win_odds is None
+
+
+def test_parse_pedigree() -> None:
+    ped = parse_pedigree((FIXTURES / "pedigree.html").read_text(encoding="utf-8"), "2022105287")
+    assert ped == Pedigree(
+        horse_id="2022105287",
+        sire_id="2012104511",
+        sire_name="テストサイアー",
+        sire_line="Mr. Prospector系",
+        sire_sire_id="2001103460",
+        sire_sire_name="テストグランドサイアー",
+        dam_id="2011104256",
+        dam_name="テストダム",
+        damsire_id="1998101554",
+        damsire_name="テストダムサイアー",
+    )
+
+
+def test_parse_pedigree_without_table_raises() -> None:
+    with pytest.raises(ParseError):
+        parse_pedigree("<html><body>not found</body></html>", "2022105287")
