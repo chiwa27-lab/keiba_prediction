@@ -22,6 +22,7 @@ CDP_URL = f"http://127.0.0.1:{CDP_PORT}"
 MAX_TICKETS = 120
 # SPAT4 の通常投票画面の式別ボタン（#_Inp_shiki_N）
 SHIKI_IDS = {"単勝": 1, "複勝": 2, "馬連": 5, "ワイド": 7, "3連複": 8, "3連単": 9}
+SPAT4_SHIKI_NAMES = {1: "単勝", 2: "複勝", 5: "馬複", 7: "ワイド", 8: "三連複", 9: "三連単"}
 TIMEOUT_MS = 15_000
 
 
@@ -137,28 +138,50 @@ def _wait_cart(page: Any, expected: int) -> None:
     )
 
 
-def _login(page: Any, settings: Spat4Settings) -> None:
+VOTE_LINK = "a[target=spat4_LiveVote] span.btn_live"
+
+
+def _find_menu(context: Any, timeout_ms: int = 0) -> Any:
+    """ログイン済みのメニュー画面（通常投票ボタンがあるタブ）を探す。ログインすると別のタブに開くことがある."""
+    deadline = time.monotonic() + timeout_ms / 1000
+    while True:
+        for page in context.pages:
+            if "spat4.jp" in page.url and page.locator(VOTE_LINK).count():
+                return page
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
+def _login(context: Any, settings: Spat4Settings) -> Any:
+    page = next((p for p in context.pages if "spat4.jp/keiba/pc" in p.url), None)
+    if page is None:
+        page = context.new_page()
+        page.goto(SPAT4_URL)
     if not page.locator("#MEMBERNUMR").is_visible():
-        return
+        raise Spat4BrowserError(
+            "SPAT4 のメニュー画面が見つかりません。SPAT4 用の Chrome でログインしてからやり直してください"
+        )
+    if not settings.complete:
+        raise Spat4BrowserError(
+            "設定で加入者番号と利用者IDを保存するか、SPAT4 用の Chrome でログインしてからやり直してください"
+        )
     page.fill("#MEMBERNUMR", settings.member_number)
     page.fill("#MEMBERIDR", settings.user_id)
     page.click("a.loginbtn")
-    page.wait_for_load_state()
-    if page.locator("#MEMBERNUMR").is_visible():
+    menu = _find_menu(context, TIMEOUT_MS)
+    if menu is None:
         raise Spat4BrowserError("SPAT4 にログインできませんでした。加入者番号と利用者IDを確かめてください")
+    return menu
 
 
 def _vote_page(context: Any, settings: Spat4Settings) -> Any:
     for page in context.pages:
         if "HANDLERR=L000S" in page.url:
             return page
-    menu = next((p for p in context.pages if "spat4.jp/keiba/pc" in p.url), None)
-    if menu is None:
-        menu = context.new_page()
-        menu.goto(SPAT4_URL)
-    _login(menu, settings)
+    menu = _find_menu(context) or _login(context, settings)
     with context.expect_page(timeout=TIMEOUT_MS) as info:
-        menu.click("a[target=spat4_LiveVote] span.btn_live")
+        menu.click(VOTE_LINK)
     page = info.value
     page.wait_for_selector("#Bet1", state="visible", timeout=TIMEOUT_MS)
     return page
@@ -179,17 +202,67 @@ def _select_race(page: Any, ticket: Ticket) -> None:
     _check_dialog(page)
 
 
-def _enter_ticket(page: Any, ticket: Ticket) -> None:
-    shiki = page.locator(f"#_Inp_shiki_{ticket.shiki}")
-    if shiki.count() == 0:
+def _is_current(page: Any, selector: str) -> bool:
+    return "current" in (page.locator(selector).get_attribute("class") or "").split()
+
+
+def _select_shiki(page: Any, ticket: Ticket) -> None:
+    """券種ボタンを目的の1つだけ選んだ状態にする。単勝と複勝は同時に選べるトグルになっている."""
+    target = f"#_Inp_shiki_{ticket.shiki}"
+    if page.locator(target).count() == 0 or "inactive" in (page.locator(target).get_attribute("class") or ""):
         raise Spat4BrowserError(f"{ticket.place} {ticket.race_no}R でこの券種は発売していません")
-    shiki.click()
-    page.wait_for_timeout(300)
+    if not _is_current(page, target):
+        page.click(target)
+        page.wait_for_timeout(300)
+    for other in (1, 2):
+        selector = f"#_Inp_shiki_{other}"
+        if other != ticket.shiki and page.locator(selector).count() and _is_current(page, selector):
+            page.click(selector)
+            page.wait_for_timeout(300)
+    if not _is_current(page, target):
+        raise Spat4BrowserError(f"{ticket.place} {ticket.race_no}R の券種を選べませんでした")
+
+
+def _enter_ticket(page: Any, ticket: Ticket, expected: int) -> None:
+    """1点ずつ馬番を選び、「セットして投票を続ける」で確定する（同じレースの同じ券種でも1点ずつ）."""
+    _select_shiki(page, ticket)
     for column, horse in enumerate(ticket.horses, start=1):
         row = page.locator(f"#ent_tbl tr.entry:has(span.num-um{horse})")
         if row.count() == 0:
             raise Spat4BrowserError(f"{ticket.place} {ticket.race_no}R に {horse} 番の馬がいません")
         row.locator(f"span.td-no{column}").click()
+    _wait_cart(page, expected)
+    page.click("#gotoNext")
+    page.wait_for_selector("#gotoNext.inactive", state="attached")
+    _wait_cart(page, expected)
+
+
+CFM_ROWS_JS = """() => [...document.querySelectorAll('#Cfm tr')].filter(tr => tr.querySelector('td.kaime')).map(tr => [
+    tr.querySelector('td.race p').textContent.replace(/\\s+/g, ' ').trim(),
+    tr.querySelector('td.shikibetsu').textContent.trim(),
+    [...tr.querySelectorAll('td.kaime [class*=num-um-s]')].map(e => e.className.match(/num-um-s(\\d+)/)[1]).join('-'),
+    tr.querySelector('td.kingaku').textContent.trim()])"""
+
+
+def _ticket_key(
+    place: str, race_no: int, shiki_name: str, horses: tuple[int, ...]
+) -> tuple[str, int, str, tuple[int, ...]]:
+    return place, race_no, shiki_name, horses if shiki_name == "三連単" else tuple(sorted(horses))
+
+
+def _verify_confirmation(page: Any, tickets: list[Ticket]) -> None:
+    """確認画面の買い目が、入力したかった買い目とすべて一致するか確かめる."""
+    shown = []
+    for race, shiki_name, horses, amount in page.evaluate(CFM_ROWS_JS):
+        place, _, race_no = race.partition(" ")
+        if amount.replace(",", "") != "100円" or not horses:
+            raise Spat4BrowserError(f"確認画面の買い目が想定と違います（{race} {shiki_name} {amount}）")
+        shown.append(_ticket_key(place, int(race_no.rstrip("R")), shiki_name, tuple(int(h) for h in horses.split("-"))))
+    expected = [_ticket_key(t.place, t.race_no, SPAT4_SHIKI_NAMES[t.shiki], t.horses) for t in tickets]
+    if sorted(shown) != sorted(expected):
+        raise Spat4BrowserError(
+            "確認画面の買い目が入力したかった買い目と一致しません。投票せずに、SPAT4 の画面で買い目を全削除してください"
+        )
 
 
 def enter_votes(
@@ -230,8 +303,7 @@ def enter_votes(
                 if key != current:
                     _select_race(page, ticket)
                     current = key
-                _enter_ticket(page, ticket)
-                _wait_cart(page, n)
+                _enter_ticket(page, ticket, n)
             page.click("#gotoBuy")
             page.wait_for_selector("#Buy1", state="visible")
             _check_dialog(page)
@@ -244,8 +316,11 @@ def enter_votes(
             page.click("#gotoCfm-buy")
             page.wait_for_selector("#Cfm", state="visible")
             _check_dialog(page)
+            _verify_confirmation(page, tickets)
             page.fill("#Cfm input[name=cfm_ansho]", pin)
             page.fill("#Cfm input[name=cfm_amount]", str(total_yen))
             page.bring_to_front()
     except PlaywrightError as exc:
-        raise Spat4BrowserError(f"SPAT4 の画面を操作できませんでした: {type(exc).__name__}") from None
+        raise Spat4BrowserError(
+            f"SPAT4 の画面を操作できませんでした: {type(exc).__name__}: {str(exc).splitlines()[0][:200]}"
+        ) from None
