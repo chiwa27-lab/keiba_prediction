@@ -37,6 +37,11 @@ def test_settings_roundtrip_and_validation(tmp_path: Path) -> None:
         save_settings(tmp_path, Spat4Settings("abc", "1234"))
     with pytest.raises(ValueError):
         save_settings(tmp_path, Spat4Settings("1", "2", 0))
+    save_settings(tmp_path, Spat4Settings("12345678", "abc123XYZ"))
+    assert load_settings(tmp_path).user_id == "abc123XYZ"
+    for bad in ["ａｂｃ", "abc-123", "a" * 33]:
+        with pytest.raises(ValueError, match="利用者ID"):
+            save_settings(tmp_path, Spat4Settings("12345678", bad))
 
 
 def test_build_tickets_only_selected_races_and_types() -> None:
