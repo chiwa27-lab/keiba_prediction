@@ -89,7 +89,8 @@ def _ensure_chrome(data_dir: Path) -> None:
     """SPAT4 用の Chrome（普段の Chrome とは別のプロファイル）を開く。開いていればそのまま使う."""
     if _cdp_ready():
         return
-    profile = data_dir / "spat4_profile"
+    # Chrome は相対パスのプロファイルを開けないため、フルパスで渡す
+    profile = (data_dir / "spat4_profile").resolve()
     profile.mkdir(parents=True, exist_ok=True)
     subprocess.Popen(  # noqa: S603
         [
